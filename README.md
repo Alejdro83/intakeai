@@ -30,36 +30,43 @@ IntakeAI is a universal reception agent powered by AssemblyAI's Voice Agent API.
 | 🏢 `office` | Office visitor registration |
 | 🎪 `event` | Event attendee registration |
 
+## 📱 WebApp (Mobile-First)
+
+The webapp works as:
+
+1. **Telegram Mini App** — Open @IntakeAI_bot in Telegram
+2. **Standalone Web Page** — Open the URL directly in any browser
+
+### Features
+
+- 📷 Camera access for document scanning
+- 🎤 Voice interaction with AssemblyAI
+- 📱 Mobile-first responsive design
+- 🔍 Browser-side OCR with Tesseract.js
+- 🎯 Works on phone, tablet, and desktop
+
 ## 🚀 Quick Start
 
 ### 1. Clone & configure
 
 ```sh
-git clone https://github.com/YOUR_USER/intakeai.git
+git clone https://github.com/Alejdro83/intakeai.git
 cd intakeai
 cp .env.example .env
 # Add your ASSEMBLYAI_API_KEY to .env
 ```
 
-### 2. Start the backend API
+### 2. Start the server
 
 ```sh
 python api/server.py
-# 🏥 IntakeAI API running on http://localhost:8001
+# 🏥 IntakeAI running on http://localhost:8001
 ```
 
-### 3. Publish the agent
+### 3. Open the webapp
 
-```sh
-python publish.py
-# Creates/updates the agent in your AssemblyAI account
 ```
-
-### 4. Open the browser
-
-```sh
-python deployment/browser/server.py
-# Talk to it: http://localhost:3000
+http://localhost:8001/
 ```
 
 ## 📁 Project Structure
@@ -69,14 +76,16 @@ intakeai/
 ├── agents/
 │   └── intake-clinic.jsonc    # Voice agent definition
 ├── api/
-│   └── server.py              # Backend API (OCR, questionnaires, registration)
+│   └── server.py              # Backend API + WebApp server
 │   └── data/
 │       └── submissions.json   # Registered visitors (auto-created)
+├── telegram/
+│   └── webapp/                # Frontend webapp
+│       ├── index.html         # Main page
+│       ├── app.js             # JavaScript logic
+│       └── style.css          # Mobile-first styles
 ├── deployment/
-│   └── browser/
-│       ├── server.py          # Web server (serves UI + mints tokens)
-│       ├── index.html         # Browser UI
-│       └── app.js             # Client-side voice agent code
+│   └── browser/               # Browser deployment (fallback)
 ├── lib.py                     # Shared utilities
 ├── publish.py                 # Publish agent to AssemblyAI
 └── .env                       # Configuration (gitignored)
@@ -86,6 +95,7 @@ intakeai/
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
+| `/` | GET | WebApp (index.html) |
 | `/health` | GET | Health check |
 | `/api/templates` | GET | List available business templates |
 | `/api/questionnaire?business_type=clinic` | GET | Get questionnaire for business type |
@@ -102,6 +112,14 @@ The agent is defined in `agents/intake-clinic.jsonc` as a JSON file. It uses:
   - `scan_document` — triggers OCR on the document
   - `get_questionnaire` — fetches questions for the business type
   - `register_visitor` — saves the completed registration
+
+## 📱 Telegram Mini App
+
+To set up as a Telegram Mini App:
+
+1. Create a bot with @BotFather
+2. Set the WebApp URL to your deployed server
+3. Users can open the Mini App from the bot menu
 
 ## 📋 Adding a New Business Template
 
@@ -129,10 +147,12 @@ Edit `api/server.py` and add to the `QUESTIONNAIRES` dict:
 - **Multimodal** — voice + vision (document scanning)
 - **Universal** — works for any business with configurable templates
 - **Real-world value** — eliminates repetitive reception work
-- **Built on Virtu** — uses proven OCR and session management from Virtu
+- **Mobile-first** — works on phone, tablet, and desktop
+- **Telegram integration** — Mini App for zero-friction access
 
 ## 📚 References
 
 - [AssemblyAI Voice Agent API](https://www.assemblyai.com/docs/voice-agents/voice-agent-api)
 - [Voice Agent Starter (Python)](https://github.com/AssemblyAI/voice-agent-starter-python)
 - [AssemblyAI Voices](https://www.assemblyai.com/docs/voice-agents/voice-agent-api/voices)
+- [Telegram Mini Apps](https://core.telegram.org/api/webapps)
