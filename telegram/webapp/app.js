@@ -417,9 +417,9 @@ RULES:
             state.aaiWs.send(JSON.stringify({
                 type: 'session.update',
                 session: {
-                    agent_id,
                     system_prompt: systemPrompt,
                     greeting: state.welcomeText || 'Welcome! Let me help you check in.',
+                    voice: { voice_id: 'anna' },
                 },
             }));
         };
