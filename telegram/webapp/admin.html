@@ -1,0 +1,464 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Virtualobby — Admin Dashboard</title>
+    <style>
+        :root {
+            --primary: #2563eb;
+            --primary-dark: #1d4ed8;
+            --success: #22c55e;
+            --danger: #ef4444;
+            --bg: #f8fafc;
+            --card: #ffffff;
+            --text: #1e293b;
+            --muted: #64748b;
+            --border: #e2e8f0;
+            --radius: 12px;
+        }
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: var(--bg);
+            color: var(--text);
+            min-height: 100vh;
+        }
+        .header {
+            background: var(--primary);
+            color: white;
+            padding: 20px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        .header h1 { font-size: 22px; }
+        .header .badge {
+            background: rgba(255,255,255,0.2);
+            padding: 4px 12px;
+            border-radius: 20px;
+            font-size: 13px;
+        }
+        .container { max-width: 800px; margin: 0 auto; padding: 24px; }
+        
+        /* Cards */
+        .card {
+            background: var(--card);
+            border-radius: var(--radius);
+            padding: 24px;
+            margin-bottom: 20px;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.08);
+        }
+        .card h2 {
+            font-size: 18px;
+            margin-bottom: 16px;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+        
+        /* Business type selector */
+        .biz-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+            gap: 12px;
+            margin-bottom: 20px;
+        }
+        .biz-option {
+            border: 2px solid var(--border);
+            border-radius: 10px;
+            padding: 16px;
+            text-align: center;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+        .biz-option:hover { border-color: var(--primary); }
+        .biz-option.selected {
+            border-color: var(--primary);
+            background: rgba(37,99,235,0.05);
+        }
+        .biz-option .icon { font-size: 32px; margin-bottom: 8px; }
+        .biz-option .name { font-size: 13px; font-weight: 500; }
+        
+        /* Form */
+        .form-group { margin-bottom: 16px; }
+        .form-group label {
+            display: block;
+            font-size: 14px;
+            font-weight: 500;
+            margin-bottom: 6px;
+            color: var(--muted);
+        }
+        .form-group input, .form-group select, .form-group textarea {
+            width: 100%;
+            padding: 10px 14px;
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            font-size: 15px;
+            font-family: inherit;
+        }
+        .form-group input:focus, .form-group select:focus {
+            outline: none;
+            border-color: var(--primary);
+            box-shadow: 0 0 0 3px rgba(37,99,235,0.1);
+        }
+        
+        /* Questions list */
+        .question-item {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            padding: 12px;
+            background: var(--bg);
+            border-radius: 8px;
+            margin-bottom: 8px;
+        }
+        .question-item .q-text { flex: 1; font-size: 14px; }
+        .question-item .q-type {
+            font-size: 11px;
+            background: var(--border);
+            padding: 2px 8px;
+            border-radius: 4px;
+            color: var(--muted);
+        }
+        .question-item .q-delete {
+            color: var(--danger);
+            cursor: pointer;
+            font-size: 18px;
+            background: none;
+            border: none;
+        }
+        
+        /* Buttons */
+        .btn {
+            padding: 10px 20px;
+            border-radius: 8px;
+            font-size: 14px;
+            font-weight: 500;
+            border: none;
+            cursor: pointer;
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            font-family: inherit;
+        }
+        .btn-primary { background: var(--primary); color: white; }
+        .btn-primary:hover { background: var(--primary-dark); }
+        .btn-secondary { background: var(--bg); color: var(--text); border: 1px solid var(--border); }
+        .btn-success { background: var(--success); color: white; }
+        .btn-sm { padding: 6px 12px; font-size: 13px; }
+        
+        /* QR section */
+        .qr-section {
+            text-align: center;
+            padding: 30px;
+        }
+        .qr-code {
+            width: 200px;
+            height: 200px;
+            margin: 16px auto;
+            background: var(--bg);
+            border-radius: 12px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 80px;
+        }
+        .visit-link {
+            background: var(--bg);
+            padding: 12px;
+            border-radius: 8px;
+            font-family: monospace;
+            font-size: 14px;
+            word-break: break-all;
+            margin: 12px 0;
+        }
+        
+        /* Submissions */
+        .sub-table { width: 100%; border-collapse: collapse; }
+        .sub-table th, .sub-table td {
+            padding: 10px 12px;
+            text-align: left;
+            border-bottom: 1px solid var(--border);
+            font-size: 14px;
+        }
+        .sub-table th { color: var(--muted); font-weight: 500; font-size: 12px; text-transform: uppercase; }
+        .empty-state { text-align: center; padding: 40px; color: var(--muted); }
+        
+        /* Steps */
+        .steps { display: flex; gap: 8px; margin-bottom: 24px; }
+        .step-dot {
+            width: 32px; height: 32px;
+            border-radius: 50%;
+            background: var(--border);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 13px;
+            font-weight: 600;
+            color: var(--muted);
+        }
+        .step-dot.active { background: var(--primary); color: white; }
+        .step-dot.done { background: var(--success); color: white; }
+        .step-line { flex: 1; height: 2px; background: var(--border); align-self: center; }
+        .step-line.done { background: var(--success); }
+        
+        .hidden { display: none; }
+    </style>
+</head>
+<body>
+    <header class="header">
+        <h1>🏥 Virtualobby</h1>
+        <span class="badge">Admin</span>
+    </header>
+
+    <div class="container">
+        <!-- Steps indicator -->
+        <div class="steps">
+            <div class="step-dot active" id="dot-1">1</div>
+            <div class="step-line" id="line-1"></div>
+            <div class="step-dot" id="dot-2">2</div>
+            <div class="step-line" id="line-2"></div>
+            <div class="step-dot" id="dot-3">3</div>
+        </div>
+
+        <!-- Step 1: Business Type -->
+        <div class="card" id="step-1">
+            <h2>🏢 Select Your Business Type</h2>
+            <div class="biz-grid" id="biz-grid"></div>
+        </div>
+
+        <!-- Step 2: Customize -->
+        <div class="card hidden" id="step-2">
+            <h2>⚙️ Customize Your Lobby</h2>
+            
+            <div class="form-group">
+                <label>Business Name</label>
+                <input type="text" id="biz-name" placeholder="e.g. Downtown Medical Clinic">
+            </div>
+            
+            <div class="form-group">
+                <label>Questions (edit or remove)</label>
+                <div id="questions-list"></div>
+                <div style="margin-top: 12px; display: flex; gap: 8px;">
+                    <input type="text" id="new-question" placeholder="Add a custom question..." style="flex:1">
+                    <button class="btn btn-secondary btn-sm" onclick="addQuestion()">+ Add</button>
+                </div>
+            </div>
+            
+            <div style="display: flex; gap: 12px; margin-top: 20px;">
+                <button class="btn btn-secondary" onclick="goToStep(1)">← Back</button>
+                <button class="btn btn-primary" onclick="saveLobby()">Create Lobby →</button>
+            </div>
+        </div>
+
+        <!-- Step 3: Ready -->
+        <div class="card hidden" id="step-3">
+            <h2>🎉 Your Lobby is Ready!</h2>
+            
+            <div class="qr-section">
+                <p>Share this link with your visitors:</p>
+                <div class="qr-code" id="qr-display">📱</div>
+                <div class="visit-link" id="visit-link"></div>
+                <button class="btn btn-primary" onclick="copyLink()">📋 Copy Link</button>
+            </div>
+            
+            <div style="margin-top: 24px; display: flex; gap: 12px;">
+                <button class="btn btn-secondary" onclick="goToStep(2)">⚙️ Edit Lobby</button>
+                <button class="btn btn-success" onclick="showSubmissions()">📊 View Visitors</button>
+            </div>
+        </div>
+
+        <!-- Submissions -->
+        <div class="card hidden" id="submissions-card">
+            <h2>📊 Registered Visitors</h2>
+            <div id="submissions-content"></div>
+            <button class="btn btn-secondary" style="margin-top: 16px;" onclick="hideSubmissions()">← Back</button>
+        </div>
+    </div>
+
+    <script>
+        const API = 'https://virtualobby-api.alejdro.workers.dev';
+        
+        const TEMPLATES = {
+            clinic: { icon: '🏥', name: 'Medical Clinic' },
+            lawyer: { icon: '⚖️', name: 'Law Firm' },
+            hotel: { icon: '🏨', name: 'Hotel' },
+            office: { icon: '🏢', name: 'Office' },
+            event: { icon: '🎪', name: 'Event' }
+        };
+        
+        const DEFAULT_QUESTIONS = {
+            clinic: [
+                'Do you have an appointment today?',
+                'Which doctor are you here to see?',
+                'What is the reason for your visit?',
+                'Any known allergies?',
+                'Do you have medical insurance?'
+            ],
+            lawyer: [
+                'What type of legal matter?',
+                'Briefly describe your situation:',
+                'Do you have relevant documents?',
+                'How urgent is this?',
+                'Preferred language?'
+            ],
+            hotel: [
+                'Do you have a reservation?',
+                'Check-in date?',
+                'Check-out date?',
+                'Room preferences?',
+                'Business or leisure?'
+            ],
+            office: [
+                'What company are you visiting?',
+                'Who are you here to see?',
+                'Purpose of your visit?',
+                'Do you have an appointment?',
+                'Need parking validation?'
+            ],
+            event: [
+                'Which event are you attending?',
+                'Ticket type?',
+                'Company or organization?',
+                'Dietary restrictions?',
+                'T-shirt size?'
+            ]
+        };
+        
+        let selectedType = null;
+        let questions = [];
+        let lobbyId = null;
+        
+        // Init business grid
+        function initBizGrid() {
+            const grid = document.getElementById('biz-grid');
+            for (const [key, val] of Object.entries(TEMPLATES)) {
+                const div = document.createElement('div');
+                div.className = 'biz-option';
+                div.innerHTML = `<div class="icon">${val.icon}</div><div class="name">${val.name}</div>`;
+                div.onclick = () => selectBiz(key);
+                grid.appendChild(div);
+            }
+        }
+        
+        function selectBiz(type) {
+            selectedType = type;
+            questions = [...DEFAULT_QUESTIONS[type]];
+            
+            document.querySelectorAll('.biz-option').forEach(el => el.classList.remove('selected'));
+            event.currentTarget.classList.add('selected');
+            
+            setTimeout(() => goToStep(2), 300);
+        }
+        
+        function goToStep(n) {
+            document.getElementById('step-1').classList.toggle('hidden', n !== 1);
+            document.getElementById('step-2').classList.toggle('hidden', n !== 2);
+            document.getElementById('step-3').classList.toggle('hidden', n !== 3);
+            document.getElementById('submissions-card').classList.add('hidden');
+            
+            for (let i = 1; i <= 3; i++) {
+                document.getElementById('dot-' + i).className = 'step-dot' + (i < n ? ' done' : i === n ? ' active' : '');
+                if (i < 3) document.getElementById('line-' + i).className = 'step-line' + (i < n ? ' done' : '');
+            }
+            
+            if (n === 2) renderQuestions();
+            if (n === 3) generateLink();
+        }
+        
+        function renderQuestions() {
+            const list = document.getElementById('questions-list');
+            list.innerHTML = '';
+            questions.forEach((q, i) => {
+                const div = document.createElement('div');
+                div.className = 'question-item';
+                div.innerHTML = `
+                    <span class="q-text">${q}</span>
+                    <button class="q-delete" onclick="removeQuestion(${i})">×</button>
+                `;
+                list.appendChild(div);
+            });
+        }
+        
+        function addQuestion() {
+            const input = document.getElementById('new-question');
+            if (input.value.trim()) {
+                questions.push(input.value.trim());
+                input.value = '';
+                renderQuestions();
+            }
+        }
+        
+        function removeQuestion(i) {
+            questions.splice(i, 1);
+            renderQuestions();
+        }
+        
+        async function saveLobby() {
+            const name = document.getElementById('biz-name').value || TEMPLATES[selectedType].name;
+            lobbyId = crypto.randomUUID().slice(0, 8);
+            
+            const lobby = {
+                id: lobbyId,
+                name: name,
+                business_type: selectedType,
+                questions: questions,
+                created: new Date().toISOString()
+            };
+            
+            // Save to backend
+            await fetch(API + '/api/lobbies', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(lobby)
+            });
+            
+            goToStep(3);
+        }
+        
+        function generateLink() {
+            const link = window.location.origin + '/visit/' + lobbyId;
+            document.getElementById('visit-link').textContent = link;
+        }
+        
+        function copyLink() {
+            const link = document.getElementById('visit-link').textContent;
+            navigator.clipboard.writeText(link);
+            alert('Link copied!');
+        }
+        
+        async function showSubmissions() {
+            document.getElementById('step-3').classList.add('hidden');
+            document.getElementById('submissions-card').classList.remove('hidden');
+            
+            const res = await fetch(API + '/api/submissions');
+            const data = await res.json();
+            
+            const content = document.getElementById('submissions-content');
+            if (!data.submissions || data.submissions.length === 0) {
+                content.innerHTML = '<div class="empty-state">No visitors yet. Share your link to get started!</div>';
+                return;
+            }
+            
+            let html = '<table class="sub-table"><tr><th>Name</th><th>ID</th><th>Time</th></tr>';
+            data.submissions.forEach(s => {
+                html += `<tr>
+                    <td>${s.visitor?.full_name || 'N/A'}</td>
+                    <td>${s.visitor?.id_number || 'N/A'}</td>
+                    <td>${new Date(s.timestamp).toLocaleString()}</td>
+                </tr>`;
+            });
+            html += '</table>';
+            content.innerHTML = html;
+        }
+        
+        function hideSubmissions() {
+            document.getElementById('submissions-card').classList.add('hidden');
+            document.getElementById('step-3').classList.remove('hidden');
+        }
+        
+        initBizGrid();
+    </script>
+</body>
+</html>

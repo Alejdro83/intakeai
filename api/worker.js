@@ -471,6 +471,47 @@ export default {
       return jsonResponse({ success: true, submission_id: submission.id });
     }
 
+    // ── Lobbies API ──
+    
+    // Create lobby
+    if (path === "/api/lobbies" && method === "POST") {
+      let body;
+      try { body = await request.json(); } catch { return jsonResponse({ error: "Invalid JSON" }, 400); }
+      
+      const lobby = {
+        id: body.id || crypto.randomUUID().slice(0, 8),
+        name: body.name || "Virtualobby",
+        business_type: body.business_type || "clinic",
+        questions: body.questions || [],
+        created: new Date().toISOString()
+      };
+      
+      await env.VIRTUALOBBY_KV.put("lobby:" + lobby.id, JSON.stringify(lobby));
+      return jsonResponse(lobby);
+    }
+    
+    // Get lobby
+    if (path.startsWith("/api/lobbies/") && method === "GET") {
+      const lobbyId = path.split("/").pop();
+      const lobby = await env.VIRTUALOBBY_KV.get("lobby:" + lobbyId, { type: "json" });
+      if (!lobby) return jsonResponse({ error: "Lobby not found" }, 404);
+      return jsonResponse(lobby);
+    }
+
+    // ── Static Pages ──
+    
+    // Admin page
+    if (path === "/admin" || path === "/admin/") {
+      const html = await env.VIRTUALOBBY_KV.get("page:admin", { type: "text" });
+      if (html) return new Response(html, { headers: { "Content-Type": "text/html" } });
+    }
+    
+    // Visit page (serve visit.html for any /visit/* path)
+    if (path.startsWith("/visit/")) {
+      const html = await env.VIRTUALOBBY_KV.get("page:visit", { type: "text" });
+      if (html) return new Response(html, { headers: { "Content-Type": "text/html" } });
+    }
+
     return jsonResponse({ error: "Not found" }, 404);
   },
 };
