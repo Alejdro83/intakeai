@@ -15,13 +15,12 @@
 // ── Configuration ──────────────────────────────────────────────────────────
 
 const CONFIG = {
-    // Backend API URL (change for production)
-    API_URL: window.location.hostname === 'localhost' 
-        ? 'http://localhost:8010' 
-        : `${window.location.protocol}//${window.location.host}`,
+    // Backend API URL (Cloudflare Worker)
+    API_URL: 'https://virtualobby-api.alejdro.workers.dev',
     
     // AssemblyAI Voice Agent WebSocket URL
     VOICE_AGENT_URL: 'wss://agents.assemblyai.com/v1/ws',
+    AGENT_ID: 'agent_7c0413e77ccc4444b52badf911665aee',
     
     // Telegram Mini App (if available)
     tgApp: window.Telegram?.WebApp || null

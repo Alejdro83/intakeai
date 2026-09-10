@@ -34,7 +34,7 @@
       "execution_mode": "hold",
       "timeout_seconds": 30,
       "http": {
-        "url": "${INTAKE_API_URL}/api/scan",
+        "url": "https://virtualobby-api.alejdro.workers.dev/api/scan",
         "http_method": "POST",
         "headers": [
           {
@@ -60,7 +60,7 @@
       "execution_mode": "hold",
       "timeout_seconds": 10,
       "http": {
-        "url": "${INTAKE_API_URL}/api/questionnaire",
+        "url": "https://virtualobby-api.alejdro.workers.dev/api/questionnaire",
         "http_method": "GET",
         "headers": [
           {
@@ -94,7 +94,7 @@
       "execution_mode": "hold",
       "timeout_seconds": 15,
       "http": {
-        "url": "${INTAKE_API_URL}/api/register",
+        "url": "https://virtualobby-api.alejdro.workers.dev/api/register",
         "http_method": "POST",
         "headers": [
           {
