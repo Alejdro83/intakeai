@@ -1,5 +1,6 @@
 // Virtualobby API — Cloudflare Worker
-// Handles document scanning, questionnaire management, and visitor registration.
+// Handles document scanning, questionnaire management, visitor registration,
+// and mints temporary tokens for AssemblyAI Voice Agent.
 
 // ── Questionnaire Templates ────────────────────────────────────────────────
 
@@ -75,12 +76,10 @@ function parseOCR(rawText, confidence) {
     const line = lines[i];
     const lower = line.toLowerCase();
 
-    // Name detection
     if (["nombre", "name", "nom:", "apellido"].some((kw) => lower.includes(kw))) {
       if (i + 1 < lines.length) fields.full_name = lines[i + 1];
     }
 
-    // ID number detection
     if (["dni", "nif", "nie", "id:", "document", "passport", "no."].some((kw) => lower.includes(kw))) {
       const match = line.match(/\d{5,}[A-Z]?/);
       if (match) fields.id_number = match[0];
@@ -90,23 +89,19 @@ function parseOCR(rawText, confidence) {
       }
     }
 
-    // Date detection
     if (["nacimiento", "birth", "born", "fecha"].some((kw) => lower.includes(kw))) {
       const dateMatch = line.match(/\d{2}[/-]\d{2}[/-]\d{4}/);
       if (dateMatch) fields.date_of_birth = dateMatch[0];
     }
 
-    // Nationality
     if (["nacionalidad", "nationality", "nac."].some((kw) => lower.includes(kw))) {
       if (i + 1 < lines.length) fields.nationality = lines[i + 1];
     }
   }
 
-  // Fallback: try to extract from full text
   if (Object.keys(fields).length === 0 && rawText) {
     const idMatch = rawText.match(/\b\d{5,8}[A-Z]?\b/);
     if (idMatch) fields.id_number = idMatch[0];
-
     const dateMatch = rawText.match(/\b\d{2}[/-]\d{2}[/-]\d{4}\b/);
     if (dateMatch) fields.date_of_birth = dateMatch[0];
   }
@@ -191,6 +186,28 @@ export default {
         return jsonResponse({ submissions: subs || [] });
       }
 
+      // Token endpoint — mint temporary token for Voice Agent
+      if (path === "/api/token" || path === "/token") {
+        try {
+          const tokenRes = await fetch(
+            "https://agents.assemblyai.com/v1/token?expires_in_seconds=300&max_session_duration_seconds=3600",
+            {
+              headers: {
+                "Authorization": "Bearer " + env.ASSEMBLYAI_API_KEY,
+              },
+            }
+          );
+          if (!tokenRes.ok) {
+            const errText = await tokenRes.text();
+            return jsonResponse({ error: "Token request failed: " + errText }, 502);
+          }
+          const tokenData = await tokenRes.json();
+          return jsonResponse(tokenData);
+        } catch (e) {
+          return jsonResponse({ error: "Token error: " + e.message }, 500);
+        }
+      }
+
       return jsonResponse({ error: "Not found" }, 404);
     }
 
@@ -211,7 +228,6 @@ export default {
           return jsonResponse(result);
         }
         if (body.image_data) {
-          // For now, return a message — LLM Gateway OCR needs account activation
           return jsonResponse({
             success: false,
             error: "Image OCR not yet available. Use browser Tesseract.js instead.",
@@ -244,7 +260,7 @@ export default {
         return jsonResponse({
           success: true,
           submission_id: submission.id,
-          message: `Visitor registered successfully. ID: ${submission.id}`,
+          message: "Visitor registered successfully. ID: " + submission.id,
         });
       }
 

@@ -264,7 +264,14 @@ async function connectVoiceAgent() {
         
         state.ws.onopen = () => {
             console.log('Voice agent connected');
-            addMessage('agent', 'Hello! I\'m your reception assistant. I\'ll help you check in today. Let me ask you a few questions.');
+            
+            // Send session.update with agent_id
+            state.ws.send(JSON.stringify({
+                type: 'session.update',
+                session: {
+                    agent_id: CONFIG.AGENT_ID
+                }
+            }));
         };
         
         state.ws.onmessage = (event) => {
