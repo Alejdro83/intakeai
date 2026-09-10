@@ -296,19 +296,28 @@ function handleDOMessage(msg) {
             showStep('voice');
             // After DO is connected, start AssemblyAI
             connectToAssemblyAI();
+            // Inject welcome message once AAI is ready
+            state._pendingWelcome = msg.text;
             break;
 
         case 'state':
             state.currentFsmState = msg.state;
             state.currentQuestion = msg.question;
             updateStatus(`Question ${msg.index + 1}/${msg.total}: ${msg.question}`);
-            // The agent will speak the question via its prompt/tools
+            // Inject question into AssemblyAI so the agent speaks it
+            if (msg.question && state.aaiWs?.readyState === 1) {
+                injectQuestionToAgent(msg.question, msg.index, msg.total);
+            }
             break;
 
         case 'request_camera':
             updateStatus('Please scan your ID');
             showStep('scan');
             startCamera();
+            // Tell the agent to ask for the document
+            if (state.aaiWs?.readyState === 1) {
+                injectQuestionToAgent(msg.text || 'Please show your identification document to the camera.');
+            }
             break;
 
         case 'ocr_result':
@@ -331,6 +340,21 @@ function handleDOMessage(msg) {
         default:
             console.log('Unknown DO message:', msg);
     }
+}
+
+// ── Inject text into AssemblyAI agent ──────────────────────────────────────
+// Makes the agent speak the given text as if it generated it
+function injectQuestionToAgent(text, index, total) {
+    if (!state.aaiWs || state.aaiWs.readyState !== 1) return;
+    const prefix = (index !== undefined && total !== undefined)
+        ? `[Question ${index + 1} of ${total}] `
+        : '';
+    // Send as input_text — agent will process and speak it
+    state.aaiWs.send(JSON.stringify({
+        type: 'input_text',
+        text: prefix + text,
+    }));
+    addMessage('agent', text);
 }
 
 // ── WS2: AssemblyAI Voice Agent ────────────────────────────────────────────
@@ -417,7 +441,12 @@ function handleAAILogic(msg) {
         case 'session.ready':
             state.aaiReady = true;
             console.log('AAI session ready');
-            updateStatus('Voice ready — speak your answers');
+            // Inject pending welcome message from DO
+            if (state._pendingWelcome) {
+                injectQuestionToAgent(state._pendingWelcome);
+                state._pendingWelcome = null;
+            }
+            updateStatus('Voice ready');
             break;
 
         case 'input.speech.started':
