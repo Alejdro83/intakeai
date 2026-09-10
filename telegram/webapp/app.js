@@ -543,6 +543,23 @@ function initEventListeners() {
         stopRecording();
     });
     
+    // File upload (fallback for Telegram WebView)
+    const fileUpload = document.getElementById('file-upload');
+    if (fileUpload) {
+        fileUpload.addEventListener('change', async (e) => {
+            const file = e.target.files[0];
+            if (!file) return;
+            
+            // Convert to base64
+            const reader = new FileReader();
+            reader.onload = async () => {
+                stopCamera();
+                await performOCR(reader.result);
+            };
+            reader.readAsDataURL(file);
+        });
+    }
+    
     // New visitor
     elements.btnNewVisitor.addEventListener('click', () => {
         state.businessType = null;

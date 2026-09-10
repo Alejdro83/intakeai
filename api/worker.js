@@ -264,6 +264,40 @@ export default {
         });
       }
 
+      // Telegram webhook
+      if (path === "/api/telegram" || path === "/telegram") {
+        try {
+          const update = body;
+          
+          // Handle /start command
+          if (update.message && update.message.text === "/start") {
+            const chatId = update.message.chat.id;
+            const webappUrl = "https://intakeai-col.pages.dev";
+            
+            await fetch("https://api.telegram.org/bot" + env.TELEGRAM_BOT_TOKEN + "/sendMessage", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                chat_id: chatId,
+                text: "Welcome to Virtualobby! 🏥\n\nI'll help you check in quickly using voice and document scanning.\n\nTap the button below to start:",
+                reply_markup: {
+                  inline_keyboard: [[{
+                    text: "📋 Open Virtualobby",
+                    web_app: { url: webappUrl }
+                  }]]
+                }
+              })
+            });
+            
+            return jsonResponse({ ok: true });
+          }
+          
+          return jsonResponse({ ok: true });
+        } catch (e) {
+          return jsonResponse({ error: "Telegram error: " + e.message }, 500);
+        }
+      }
+
       return jsonResponse({ error: "Not found" }, 404);
     }
 
