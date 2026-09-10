@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """IntakeAI Backend API
 
-Handles OCR document scanning, questionnaire management, and visitor registration.
-Used by the AssemblyAI Voice Agent via HTTP tools.
+Handles document scanning (via browser-side Tesseract.js OCR or AssemblyAI LLM Gateway),
+questionnaire management, and visitor registration.
 
     python api/server.py
 
 Endpoints:
-    POST /api/scan          — OCR document scan
+    POST /api/scan          — Document scan (OCR result from browser)
     GET  /api/questionnaire — Get questionnaire by business type
     POST /api/register      — Register visitor
     GET  /api/submissions   — List all submissions
@@ -19,10 +19,17 @@ import json
 import os
 import sys
 import uuid
+import urllib.request
+import urllib.error
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+
+# ── Configuration ──────────────────────────────────────────────────────────
+
+AAI_API_KEY = os.environ.get("ASSEMBLYAI_API_KEY", "")
+LLM_GATEWAY_URL = "https://llm-gateway.assemblyai.com/v1/chat/completions"
 
 # ── Questionnaire Templates ────────────────────────────────────────────────
 
@@ -89,35 +96,135 @@ QUESTIONNAIRES: Dict[str, Dict[str, Any]] = {
 }
 
 
-# ── OCR Simulation (replace with real OCR in production) ───────────────────
+# ── Document Scanning ──────────────────────────────────────────────────────
 
-def simulate_ocr(image_data: Optional[str] = None) -> Dict[str, Any]:
-    """Simulate OCR extraction. In production, this would call a real OCR service."""
-    # For the hackathon demo, we simulate document extraction
-    # In production: use gemma4:e4b or similar OCR model
+def scan_document_browser_ocr(ocr_data: Dict[str, Any]) -> Dict[str, Any]:
+    """Process OCR results from browser-side Tesseract.js.
+    
+    The browser captures the image, runs Tesseract.js OCR, and sends
+    the extracted text to this endpoint. We parse it into structured fields.
+    """
+    raw_text = ocr_data.get("raw_text", "")
+    confidence = ocr_data.get("confidence", 0.0)
+    
+    # Parse common document fields from raw text
+    fields = {}
+    lines = [l.strip() for l in raw_text.split("\n") if l.strip()]
+    
+    # Simple heuristic parsing (improve with NLP in production)
+    for i, line in enumerate(lines):
+        lower = line.lower()
+        
+        # Name detection
+        if any(kw in lower for kw in ["nombre", "name", "nom:", "apellido"]):
+            # Next line might be the value
+            if i + 1 < len(lines):
+                fields["full_name"] = lines[i + 1]
+        
+        # ID number detection
+        if any(kw in lower for kw in ["dni", "nif", "nie", "id:", "document", "passport", "no."]):
+            # Try to extract number from same line
+            import re
+            numbers = re.findall(r'\d{5,}[A-Z]?', line)
+            if numbers:
+                fields["id_number"] = numbers[0]
+            elif i + 1 < len(lines):
+                numbers = re.findall(r'\d{5,}[A-Z]?', lines[i + 1])
+                if numbers:
+                    fields["id_number"] = numbers[0]
+        
+        # Date detection
+        if any(kw in lower for kw in ["nacimiento", "birth", "born", "fecha"]):
+            import re
+            dates = re.findall(r'\d{2}[/-]\d{2}[/-]\d{4}', line)
+            if dates:
+                fields["date_of_birth"] = dates[0]
+        
+        # Nationality
+        if any(kw in lower for kw in ["nacionalidad", "nationality", "nac."]):
+            if i + 1 < len(lines):
+                fields["nationality"] = lines[i + 1]
+    
+    # If no fields were parsed, try to extract from the full text
+    if not fields and raw_text:
+        # Look for patterns in the full text
+        import re
+        
+        # Try to find ID numbers (5+ digits)
+        id_matches = re.findall(r'\b\d{5,8}[A-Z]?\b', raw_text)
+        if id_matches:
+            fields["id_number"] = id_matches[0]
+        
+        # Try to find dates
+        date_matches = re.findall(r'\b\d{2}[/-]\d{2}[/-]\d{4}\b', raw_text)
+        if date_matches:
+            fields["date_of_birth"] = date_matches[0]
+    
     return {
         "success": True,
-        "fields": {
-            "full_name": "John Smith",
-            "id_number": "12345678A",
-            "date_of_birth": "1985-03-15",
-            "nationality": "US",
-            "document_type": "ID Card",
-            "expiry_date": "2028-06-20"
-        },
-        "confidence": 0.95,
-        "raw_text": "SMITH\nJOHN\n12345678A\n15/03/1985\nUSA\n20/06/2028"
+        "fields": fields,
+        "document_type": "ID Card",
+        "confidence": confidence,
+        "raw_text": raw_text,
+        "source": "browser_tesseract"
     }
 
 
-# ── Storage (JSON file for hackathon) ──────────────────────────────────────
+def scan_document_assemblyai_llm(image_base64: str) -> Dict[str, Any]:
+    """Scan document using AssemblyAI LLM Gateway (when available)."""
+    if not AAI_API_KEY:
+        return {"success": False, "error": "ASSEMBLYAI_API_KEY not configured", "fields": {}}
+    
+    try:
+        payload = json.dumps({
+            "model": "gemini-2.5-flash",
+            "messages": [{
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "Extract all text from this document image. Return JSON with fields: full_name, id_number, date_of_birth, nationality, expiry_date, raw_text"},
+                    {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{image_base64}"}}
+                ]
+            }],
+            "max_tokens": 500
+        }).encode()
+        
+        req = urllib.request.Request(
+            LLM_GATEWAY_URL,
+            data=payload,
+            headers={"Authorization": AAI_API_KEY, "Content-Type": "application/json"},
+            method="POST"
+        )
+        
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            result = json.loads(resp.read())
+        
+        content = result.get("choices", [{}])[0].get("message", {}).get("content", "")
+        
+        try:
+            parsed = json.loads(content) if content.startswith("{") else {"raw_text": content}
+        except json.JSONDecodeError:
+            parsed = {"raw_text": content}
+        
+        return {
+            "success": True,
+            "fields": parsed.get("fields", {}),
+            "document_type": parsed.get("document_type", "Unknown"),
+            "confidence": parsed.get("confidence", 0.8),
+            "raw_text": parsed.get("raw_text", content),
+            "source": "assemblyai_llm_gateway"
+        }
+        
+    except Exception as e:
+        return {"success": False, "error": str(e), "fields": {}}
+
+
+# ── Storage ────────────────────────────────────────────────────────────────
 
 DATA_DIR = Path(__file__).parent / "data"
 SUBMISSIONS_FILE = DATA_DIR / "submissions.json"
 
 
 def load_submissions() -> List[Dict[str, Any]]:
-    """Load all submissions from disk."""
     if not SUBMISSIONS_FILE.exists():
         return []
     try:
@@ -127,7 +234,6 @@ def load_submissions() -> List[Dict[str, Any]]:
 
 
 def save_submission(submission: Dict[str, Any]) -> str:
-    """Save a new submission and return its ID."""
     DATA_DIR.mkdir(exist_ok=True)
     submissions = load_submissions()
     submission["id"] = str(uuid.uuid4())[:8]
@@ -140,10 +246,8 @@ def save_submission(submission: Dict[str, Any]) -> str:
 # ── HTTP Handler ───────────────────────────────────────────────────────────
 
 class IntakeHandler(BaseHTTPRequestHandler):
-    """Handle IntakeAI API requests."""
 
     def _send_json(self, status: int, data: Any) -> None:
-        """Send JSON response."""
         body = json.dumps(data).encode()
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
@@ -155,22 +259,15 @@ class IntakeHandler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def _read_body(self) -> Dict[str, Any]:
-        """Read and parse JSON request body."""
         length = int(self.headers.get("Content-Length", 0))
         if length == 0:
             return {}
-        raw = self.rfile.read(length)
-        try:
-            return json.loads(raw)
-        except json.JSONDecodeError:
-            return {}
+        return json.loads(self.rfile.read(length))
 
     def do_OPTIONS(self) -> None:
-        """Handle CORS preflight."""
         self._send_json(200, {"ok": True})
 
     def do_GET(self) -> None:
-        """Handle GET requests."""
         path = self.path.split("?")[0]
 
         if path == "/health":
@@ -178,24 +275,20 @@ class IntakeHandler(BaseHTTPRequestHandler):
                 "status": "ok",
                 "service": "IntakeAI",
                 "templates": list(QUESTIONNAIRES.keys()),
-                "submissions": len(load_submissions())
+                "submissions": len(load_submissions()),
+                "assemblyai_configured": bool(AAI_API_KEY),
+                "ocr_mode": "browser_tesseract" if not AAI_API_KEY else "assemblyai_llm_gateway"
             })
             return
 
         if path == "/api/questionnaire":
-            # Parse business_type from query string
             params = dict(p.split("=") for p in self.path.split("?")[1].split("&") if "=" in p) if "?" in self.path else {}
             business_type = params.get("business_type", "clinic")
-
             template = QUESTIONNAIRES.get(business_type)
             if not template:
                 self._send_json(404, {"error": f"Unknown business type: {business_type}"})
                 return
-
-            self._send_json(200, {
-                "business_type": business_type,
-                "template": template
-            })
+            self._send_json(200, {"business_type": business_type, "template": template})
             return
 
         if path == "/api/submissions":
@@ -212,27 +305,28 @@ class IntakeHandler(BaseHTTPRequestHandler):
         self._send_json(404, {"error": "Not found"})
 
     def do_POST(self) -> None:
-        """Handle POST requests."""
         path = self.path.split("?")[0]
         body = self._read_body()
 
         if path == "/api/scan":
-            # OCR document scan
-            image_data = body.get("image_data")  # base64 encoded image
-            result = simulate_ocr(image_data)
+            # Two modes: browser OCR (sends raw_text) or LLM Gateway (sends image_data)
+            if "raw_text" in body:
+                result = scan_document_browser_ocr(body)
+            elif "image_data" in body:
+                result = scan_document_assemblyai_llm(body["image_data"])
+            else:
+                self._send_json(400, {"error": "Provide raw_text (browser OCR) or image_data (LLM Gateway)"})
+                return
             self._send_json(200, result)
             return
 
         if path == "/api/register":
-            # Register visitor
             visitor_data = body.get("visitor_data", {})
             business_type = body.get("business_type", "unknown")
             confirmed = body.get("confirmed", False)
-
             if not confirmed:
                 self._send_json(400, {"error": "Visitor must confirm data before registration"})
                 return
-
             submission = {
                 "visitor": visitor_data,
                 "business_type": business_type,
@@ -240,7 +334,6 @@ class IntakeHandler(BaseHTTPRequestHandler):
                 "source": "voice_agent"
             }
             submission_id = save_submission(submission)
-
             self._send_json(200, {
                 "success": True,
                 "submission_id": submission_id,
@@ -251,19 +344,32 @@ class IntakeHandler(BaseHTTPRequestHandler):
         self._send_json(404, {"error": "Not found"})
 
     def log_message(self, format: str, *args: Any) -> None:
-        """Suppress default logging."""
         pass
 
 
 # ── Main ───────────────────────────────────────────────────────────────────
 
 def main() -> None:
-    """Start the IntakeAI API server."""
+    env_path = Path(__file__).parent.parent / ".env"
+    if env_path.exists():
+        for line in env_path.read_text().splitlines():
+            line = line.strip()
+            if line and not line.startswith("#") and "=" in line:
+                key, value = line.split("=", 1)
+                os.environ.setdefault(key.strip(), value.strip())
+    
+    global AAI_API_KEY
+    AAI_API_KEY = os.environ.get("ASSEMBLYAI_API_KEY", "")
+    
     port = int(os.environ.get("INTAKE_PORT", "8001"))
     server = ThreadingHTTPServer(("", port), IntakeHandler)
+    
     print(f"🏥 IntakeAI API running on http://localhost:{port}")
     print(f"   Health: http://localhost:{port}/health")
     print(f"   Templates: http://localhost:{port}/api/templates")
+    print(f"   AssemblyAI: {'✅ configured' if AAI_API_KEY else '❌ not configured'}")
+    print(f"   OCR Mode: {'AssemblyAI LLM Gateway' if AAI_API_KEY else 'Browser Tesseract.js'}")
+    
     try:
         server.serve_forever()
     except KeyboardInterrupt:
