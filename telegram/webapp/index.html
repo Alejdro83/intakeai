@@ -26,9 +26,9 @@
     </script>
 
     <!-- ── Header ───────────────────────────────────────────────── -->
-    <header class="header">
+    <header class="header" id="header">
         <div class="header-content">
-            <div class="logo">
+            <div class="logo" id="logo">
                 <span class="logo-icon">🏥</span>
                 <h1>Virtualobby</h1>
             </div>
@@ -41,42 +41,10 @@
 
     <!-- ── Main Content ─────────────────────────────────────────── -->
     <main class="main">
-        <!-- Step 1: Select Business Type -->
-        <section class="step" id="step-business">
-            <div class="step-header">
-                <span class="step-number">1</span>
-                <h2>Welcome</h2>
-            </div>
-            <p class="step-description">What type of business are you visiting?</p>
-            
-            <div class="business-grid" id="business-grid">
-                <button class="business-card" data-type="clinic">
-                    <span class="business-icon">🏥</span>
-                    <span class="business-name">Clinic</span>
-                </button>
-                <button class="business-card" data-type="lawyer">
-                    <span class="business-icon">⚖️</span>
-                    <span class="business-name">Lawyer</span>
-                </button>
-                <button class="business-card" data-type="hotel">
-                    <span class="business-icon">🏨</span>
-                    <span class="business-name">Hotel</span>
-                </button>
-                <button class="business-card" data-type="office">
-                    <span class="business-icon">🏢</span>
-                    <span class="business-name">Office</span>
-                </button>
-                <button class="business-card" data-type="event">
-                    <span class="business-icon">🎪</span>
-                    <span class="business-name">Event</span>
-                </button>
-            </div>
-        </section>
-
-        <!-- Step 2: Scan Document -->
+        <!-- Scan Document -->
         <section class="step hidden" id="step-scan">
             <div class="step-header">
-                <span class="step-number">2</span>
+                <span class="step-number">1</span>
                 <h2>Scan Document</h2>
             </div>
             <p class="step-description">Show your ID to the camera</p>
@@ -126,10 +94,10 @@
             </div>
         </section>
 
-        <!-- Step 3: Voice Interview -->
+        <!-- Voice Interview -->
         <section class="step hidden" id="step-voice">
             <div class="step-header">
-                <span class="step-number">3</span>
+                <span class="step-number">2</span>
                 <h2>Check-in Interview</h2>
             </div>
             
@@ -153,10 +121,10 @@
             </div>
         </section>
 
-        <!-- Step 4: Confirmation -->
+        <!-- Confirmation -->
         <section class="step hidden" id="step-confirm">
             <div class="step-header">
-                <span class="step-number">4</span>
+                <span class="step-number">3</span>
                 <h2>Confirm Registration</h2>
             </div>
             
@@ -177,6 +145,26 @@
     <footer class="footer">
         <p>Powered by <strong>AssemblyAI</strong> Voice Agent API</p>
     </footer>
+
+    <!-- Admin access: triple-tap on logo to reveal admin link -->
+    <script>
+        (function() {
+            let tapCount = 0;
+            let tapTimer = null;
+            const logo = document.getElementById('logo');
+            if (!logo) return;
+
+            logo.addEventListener('click', function() {
+                tapCount++;
+                clearTimeout(tapTimer);
+                tapTimer = setTimeout(function() { tapCount = 0; }, 800);
+                if (tapCount >= 3) {
+                    tapCount = 0;
+                    window.location.href = './admin.html';
+                }
+            });
+        })();
+    </script>
 
     <script src="app.js"></script>
 </body>
