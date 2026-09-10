@@ -342,7 +342,7 @@ async function connectToAssemblyAI() {
         // 1. Fetch ephemeral token from Worker (never expose API key)
         const resp = await fetch(`${CONFIG.API_URL}/api/token`);
         if (!resp.ok) throw new Error(`Token fetch failed: ${resp.status}`);
-        const { token, agent_id } = await resp.json();
+        const { token } = await resp.json();
 
         // 2. Two AudioContexts — Safari requires creation in user gesture,
         //    but we're inside the init flow triggered by Telegram's ready()

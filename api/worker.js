@@ -83,10 +83,7 @@ export default {
           { headers: { Authorization: `Bearer ${env.ASSEMBLYAI_API_KEY}` } }
         );
         const data = await resp.json();
-        return jsonResponse({
-          token: data.token,
-          agent_id: env.AGENT_ID || 'agent_6e4f857ba75b420cb4ea523bccd94ead'
-        });
+        return jsonResponse({ token: data.token });
       } catch (e) {
         return jsonResponse({ error: e.message }, 500);
       }
