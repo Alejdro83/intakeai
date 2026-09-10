@@ -1,0 +1,108 @@
+// IntakeAI — Universal Reception Agent
+// Voice-powered intake for any business: clinics, law firms, hotels, offices.
+//
+// Flow: Greet → Scan document → Ask questionnaire → Confirm → Register
+//
+// The agent adapts its questions based on the business template configured
+// in the backend. It uses OCR to extract data from documents and confirms
+// everything by voice before registering.
+//
+// https://www.assemblyai.com/docs/voice-agents/voice-agent-api/create-agent
+{
+  "name": "IntakeAI Reception Agent",
+
+  "system_prompt": "You are IntakeAI, a professional reception agent. Your job is to welcome visitors, collect their information, and complete their registration.\n\n## Your Flow\n1. Greet the visitor warmly and ask how you can help\n2. Ask them to show their ID document to the camera (say 'Please show your document to the camera')\n3. Once the document is scanned, confirm the extracted data by voice\n4. Ask the business-specific questionnaire questions one at a time\n5. After all questions, summarize everything you collected\n6. Ask for final confirmation\n7. Once confirmed, register the visitor\n\n## Rules\n- Ask ONE question at a time\n- Wait for the answer before asking the next\n- Be patient and professional\n- If you don't understand, ask politely to repeat\n- Speak in the visitor's language (detect from their first message)\n- Keep sentences short and clear — this is voice, not text\n- Never rush the visitor\n- If the visitor seems confused, explain what you're doing\n\n## Document Scanning\nWhen you ask for a document, use the scan_document tool. The OCR will extract text automatically. Then read back what you found and ask the visitor to confirm.\n\n## Questionnaire\nThe questionnaire is loaded from the backend based on the business type. Use the get_questionnaire tool to fetch it, then ask each question one by one.\n\n## Registration\nWhen you have all confirmed information, use the register_visitor tool to save everything. Then thank the visitor and tell them what happens next.",
+
+  "greeting": "Welcome! I'm your virtual reception assistant. I'll help you check in today. To get started, could you please show your identification document to the camera?",
+
+  "voice": { "voice_id": "anna" },
+
+  "tools": [
+    {
+      "name": "scan_document",
+      "description": "Scan and extract text from an ID document, passport, or business card shown to the camera. Returns extracted fields like name, ID number, date of birth, etc.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "instruction": {
+            "type": "string",
+            "description": "Optional instruction for the scan, like 'focus on the name field' or 'this is a passport'"
+          }
+        },
+        "required": []
+      },
+      "execution_mode": "hold",
+      "timeout_seconds": 30,
+      "http": {
+        "url": "${INTAKE_API_URL}/api/scan",
+        "http_method": "POST",
+        "headers": [
+          {
+            "name": "Authorization",
+            "value": "Bearer ${INTAKE_API_KEY}"
+          }
+        ]
+      }
+    },
+    {
+      "name": "get_questionnaire",
+      "description": "Get the intake questionnaire for the current business type. Returns a list of questions to ask the visitor.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "business_type": {
+            "type": "string",
+            "description": "The type of business: 'clinic', 'lawyer', 'hotel', 'office', or 'custom'"
+          }
+        },
+        "required": ["business_type"]
+      },
+      "execution_mode": "hold",
+      "timeout_seconds": 10,
+      "http": {
+        "url": "${INTAKE_API_URL}/api/questionnaire",
+        "http_method": "GET",
+        "headers": [
+          {
+            "name": "Authorization",
+            "value": "Bearer ${INTAKE_API_KEY}"
+          }
+        ]
+      }
+    },
+    {
+      "name": "register_visitor",
+      "description": "Register the visitor with all collected information. Call this after confirming all data with the visitor.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "visitor_data": {
+            "type": "object",
+            "description": "All collected visitor data: name, id_number, date_of_birth, plus answers to questionnaire"
+          },
+          "business_type": {
+            "type": "string",
+            "description": "The business type for this registration"
+          },
+          "confirmed": {
+            "type": "boolean",
+            "description": "Whether the visitor confirmed all data is correct"
+          }
+        },
+        "required": ["visitor_data", "business_type", "confirmed"]
+      },
+      "execution_mode": "hold",
+      "timeout_seconds": 15,
+      "http": {
+        "url": "${INTAKE_API_URL}/api/register",
+        "http_method": "POST",
+        "headers": [
+          {
+            "name": "Authorization",
+            "value": "Bearer ${INTAKE_API_KEY}"
+          }
+        ]
+      }
+    }
+  ]
+}
