@@ -12,3 +12,12 @@ database_id = "d3c8c0da-6133-479e-9214-ce05498061c3"
 [[r2_buckets]]
 binding = "R2_DOCS"
 bucket_name = "virtualobby-docs"
+
+# Durable Objects for WebSocket check-in sessions
+[[durable_objects.bindings]]
+name = "CHECKIN_DO"
+class_name = "CheckinSession"
+
+[[migrations]]
+tag = "v1"
+new_classes = ["CheckinSession"]
