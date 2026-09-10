@@ -328,17 +328,28 @@
         
         function showOCRResult() {
             const fields = ocrData.fields || {};
+            const rawText = ocrData.raw_text || '';
             const div = document.getElementById('ocr-fields');
             div.innerHTML = '';
             
             const labels = { full_name: 'Name', id_number: 'ID Number', date_of_birth: 'Date of Birth', nationality: 'Nationality' };
+            let hasFields = false;
             for (const [key, val] of Object.entries(fields)) {
                 if (val) {
                     div.innerHTML += `<div class="field-row"><span class="field-label">${labels[key]||key}</span><span class="field-value">${val}</span></div>`;
+                    hasFields = true;
                 }
             }
             
-            if (Object.keys(fields).length === 0) {
+            // Always show raw text so user sees what OCR detected
+            if (rawText.trim()) {
+                div.innerHTML += `<div style="margin-top:16px;padding-top:12px;border-top:1px solid var(--border);">
+                    <div style="font-size:12px;color:var(--muted);margin-bottom:8px;">RAW TEXT DETECTED:</div>
+                    <div style="font-size:13px;background:var(--bg);padding:12px;border-radius:8px;white-space:pre-wrap;max-height:150px;overflow-y:auto;">${rawText.substring(0, 500)}</div>
+                </div>`;
+            }
+            
+            if (!hasFields && !rawText.trim()) {
                 div.innerHTML = '<p style="color:var(--muted);">Document captured. We\'ll proceed with the check-in.</p>';
             }
             
