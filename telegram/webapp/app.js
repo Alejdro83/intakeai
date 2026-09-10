@@ -1,143 +1,505 @@
 /**
- * Virtualobby — Voice Reception WebApp
- * 
- * Works as:
- * 1. Telegram Mini App (inside Telegram)
- * 2. Standalone web page (direct URL)
- * 
- * Features:
- * - Camera access for document scanning
- * - Browser-side OCR with Tesseract.js
- * - Voice interaction with AssemblyAI Voice Agent API
- * - Mobile-first responsive design
+ * Virtualobby — Dual-WebSocket WebApp
+ *
+ * Two simultaneous connections:
+ *   WS1: Durable Object (state management, questions, OCR results)
+ *   WS2: AssemblyAI Voice Agent (voice/audio capture + playback)
+ *
+ * Flow: parse start_param → connect DO → fetch token → connect AAI →
+ *       voice Q&A → camera/OCR → summary → done
  */
 
 // ── Configuration ──────────────────────────────────────────────────────────
 
 const CONFIG = {
-    // Backend API URL (Cloudflare Worker)
     API_URL: 'https://virtualobby-api.alejdro.workers.dev',
-    
-    // AssemblyAI Voice Agent WebSocket URL
     VOICE_AGENT_URL: 'wss://agents.assemblyai.com/v1/ws',
-    AGENT_ID: 'agent_7c0413e77ccc4444b52badf911665aee',
-    
-    // Telegram Mini App (if available)
-    tgApp: window.Telegram?.WebApp || null
+    tgApp: window.Telegram?.WebApp || null,
 };
+
+// ── Audio worklet code (from AssemblyAI JS starter) ────────────────────────
+
+const WIRE_RATE = 24_000;
+
+const CAPTURE_WORKLET = `
+  class CaptureProcessor extends AudioWorkletProcessor {
+    constructor() {
+      super();
+      this._ratio = sampleRate / ${WIRE_RATE};
+      this._pos = 0;
+      this._prev = 0;
+      this._src = null;
+      this._out = null;
+    }
+    _toPcm(samples, len) {
+      const pcm = new Int16Array(len);
+      for (let i = 0; i < len; i++) {
+        const s = Math.max(-1, Math.min(1, samples[i]));
+        pcm[i] = s < 0 ? s * 0x8000 : s * 0x7fff;
+      }
+      return pcm;
+    }
+    process(inputs) {
+      const ch = inputs[0]?.[0];
+      if (!ch) return true;
+      if (this._ratio === 1) {
+        const pcm = this._toPcm(ch, ch.length);
+        this.port.postMessage(pcm.buffer, [pcm.buffer]);
+        return true;
+      }
+      const n = ch.length;
+      if (!this._src || this._src.length < n + 1) {
+        this._src = new Float32Array(n + 1);
+        this._out = new Float32Array(Math.ceil((n + 1) / this._ratio) + 2);
+      }
+      const src = this._src;
+      const out = this._out;
+      src[0] = this._prev;
+      src.set(ch, 1);
+      let outLen = 0;
+      let pos = this._pos;
+      while (pos < n) {
+        const i = Math.floor(pos);
+        const frac = pos - i;
+        out[outLen++] = src[i] + (src[i + 1] - src[i]) * frac;
+        pos += this._ratio;
+      }
+      this._pos = pos - n;
+      this._prev = ch[n - 1];
+      if (outLen) {
+        const pcm = this._toPcm(out, outLen);
+        this.port.postMessage(pcm.buffer, [pcm.buffer]);
+      }
+      return true;
+    }
+  }
+  registerProcessor('capture', CaptureProcessor);
+`;
+
+const PLAYBACK_WORKLET = `
+  class PlaybackProcessor extends AudioWorkletProcessor {
+    constructor() {
+      super();
+      this._ring = new Float32Array(sampleRate * 30);
+      this._writePos = 0;
+      this._readPos = 0;
+      this._available = 0;
+      this._step = ${WIRE_RATE} / sampleRate;
+      this._rsPos = 0;
+      this._rsPrev = 0;
+      this._drained = false;
+      this.port.onmessage = (e) => {
+        if (e.data === 'stop') {
+          this._writePos = this._readPos = this._available = 0;
+          this._rsPos = this._rsPrev = 0;
+          return;
+        }
+        const int16 = new Int16Array(e.data);
+        if (!int16.length) return;
+        if (this._drained) {
+          this._rsPrev = 0;
+          this._rsPos = 0;
+          this._drained = false;
+        }
+        if (this._step === 1) {
+          for (let i = 0; i < int16.length; i++) this._push(int16[i] / 32768);
+          return;
+        }
+        const n = int16.length;
+        let pos = this._rsPos;
+        while (pos < n) {
+          const i = Math.floor(pos);
+          const frac = pos - i;
+          const a = i === 0 ? this._rsPrev : int16[i - 1] / 32768;
+          const b = int16[i] / 32768;
+          this._push(a + (b - a) * frac);
+          pos += this._step;
+        }
+        this._rsPos = pos - n;
+        this._rsPrev = int16[n - 1] / 32768;
+      };
+    }
+    _push(v) {
+      if (this._available < this._ring.length) {
+        this._ring[this._writePos] = v;
+        this._writePos = (this._writePos + 1) % this._ring.length;
+        this._available++;
+      }
+    }
+    process(inputs, outputs) {
+      const output = outputs[0];
+      const out = output[0];
+      const cap = this._ring.length;
+      for (let i = 0; i < out.length; i++) {
+        if (this._available > 0) {
+          out[i] = this._ring[this._readPos];
+          this._readPos = (this._readPos + 1) % cap;
+          this._available--;
+        } else {
+          out[i] = 0;
+          this._drained = true;
+        }
+      }
+      for (let ch = 1; ch < output.length; ch++) output[ch].set(out);
+      return true;
+    }
+  }
+  registerProcessor('playback', PlaybackProcessor);
+`;
 
 // ── State ──────────────────────────────────────────────────────────────────
 
 const state = {
-    businessType: null,
+    businessId: null,
+    doWs: null,                // Durable Object WebSocket
+    aaiWs: null,               // AssemblyAI Voice Agent WebSocket
+    captureCtx: null,          // AudioContext for mic capture
+    playbackCtx: null,         // AudioContext for playback
+    playback: null,            // PlaybackWorkletNode
+    mic: null,                 // MediaStream
+    aaiReady: false,           // AssemblyAI session.ready received
+    currentFsmState: 'idle',
+    currentQuestion: null,
+    answers: {},
     ocrData: null,
-    visitorData: {},
-    ws: null,
-    isRecording: false,
-    audioContext: null,
-    mediaStream: null,
-    cameraFacing: 'environment' // 'user' or 'environment'
+    cameraFacing: 'environment',
+    mediaStream: null,         // camera stream (separate from mic)
 };
 
 // ── DOM Elements ───────────────────────────────────────────────────────────
 
+const $ = (id) => document.getElementById(id);
+
 const elements = {
-    // Steps
-    stepBusiness: document.getElementById('step-business'),
-    stepScan: document.getElementById('step-scan'),
-    stepVoice: document.getElementById('step-voice'),
-    stepConfirm: document.getElementById('step-confirm'),
-    
-    // Business selection
-    businessGrid: document.getElementById('business-grid'),
-    
-    // Camera
-    cameraPreview: document.getElementById('camera-preview'),
-    cameraCanvas: document.getElementById('camera-canvas'),
-    btnSwitchCamera: document.getElementById('btn-switch-camera'),
-    btnCapture: document.getElementById('btn-capture'),
-    
-    // OCR
-    ocrResult: document.getElementById('ocr-result'),
-    ocrFields: document.getElementById('ocr-fields'),
-    ocrLoading: document.getElementById('ocr-loading'),
-    btnRescan: document.getElementById('btn-rescan'),
-    btnConfirmScan: document.getElementById('btn-confirm-scan'),
-    
-    // Voice
-    transcriptMessages: document.getElementById('transcript-messages'),
-    btnVoice: document.getElementById('btn-voice'),
-    voiceStatus: document.getElementById('voice-status'),
-    
-    // Confirmation
-    confirmMessage: document.getElementById('confirm-message'),
-    confirmId: document.getElementById('confirm-id'),
-    btnNewVisitor: document.getElementById('btn-new-visitor'),
-    
-    // Status
-    status: document.getElementById('status')
+    stepScan: $('step-scan'),
+    stepVoice: $('step-voice'),
+    stepConfirm: $('step-confirm'),
+    cameraPreview: $('camera-preview'),
+    cameraCanvas: $('camera-canvas'),
+    btnSwitchCamera: $('btn-switch-camera'),
+    btnCapture: $('btn-capture'),
+    ocrResult: $('ocr-result'),
+    ocrFields: $('ocr-fields'),
+    ocrLoading: $('ocr-loading'),
+    btnRescan: $('btn-rescan'),
+    btnConfirmScan: $('btn-confirm-scan'),
+    transcriptMessages: $('transcript-messages'),
+    voiceStatus: $('voice-status'),
+    confirmMessage: $('confirm-message'),
+    confirmId: $('confirm-id'),
+    btnNewVisitor: $('btn-new-visitor'),
+    status: $('status'),
 };
 
-// ── Telegram Mini App Integration ──────────────────────────────────────────
+// ── Telegram Mini App ──────────────────────────────────────────────────────
 
 function initTelegram() {
-    if (!CONFIG.tgApp) return;
-    
-    // Set theme
-    document.body.style.setProperty('--primary', CONFIG.tgApp.themeParams.button_color || '#2563eb');
-    
-    // Get user info if available
-    const user = CONFIG.tgApp.initDataUnsafe?.user;
-    if (user) {
-        console.log('Telegram user:', user.first_name);
+    const tg = CONFIG.tgApp;
+    if (!tg) return;
+
+    tg.ready();
+    tg.expand();
+
+    // Parse start_param for business_id
+    const startParam = tg.initDataUnsafe?.start_param || '';
+    state.businessId = startParam.startsWith('business_')
+        ? startParam.replace('business_', '')
+        : 'clinic-main';
+
+    // Apply theme
+    if (tg.themeParams?.button_color) {
+        document.body.style.setProperty('--primary', tg.themeParams.button_color);
     }
-    
-    // Enable closing confirmation
-    CONFIG.tgApp.enableClosingConfirmation();
+
+    tg.enableClosingConfirmation();
+    document.body.classList.add('telegram-webapp');
+    console.log('Telegram init, business_id:', state.businessId);
 }
 
-// ── Business Selection ─────────────────────────────────────────────────────
+// ── Status helpers ─────────────────────────────────────────────────────────
 
-function initBusinessSelection() {
-    const cards = elements.businessGrid.querySelectorAll('.business-card');
-    
-    cards.forEach(card => {
-        card.addEventListener('click', () => {
-            // Remove selected from all
-            cards.forEach(c => c.classList.remove('selected'));
-            // Add selected to clicked
-            card.classList.add('selected');
-            // Set business type
-            state.businessType = card.dataset.type;
-            // Move to next step after short delay
-            setTimeout(() => showStep('scan'), 300);
+function updateStatus(text) {
+    const el = elements.status;
+    if (!el) return;
+    const span = el.querySelector('.status-text') || el;
+    span.textContent = text;
+}
+
+function showStep(step) {
+    const map = {
+        scan: elements.stepScan,
+        voice: elements.stepVoice,
+        confirm: elements.stepConfirm,
+    };
+    Object.values(map).forEach(el => el?.classList.add('hidden'));
+    map[step]?.classList.remove('hidden');
+}
+
+function addMessage(role, text) {
+    const container = elements.transcriptMessages;
+    if (!container) return;
+    const msg = document.createElement('div');
+    msg.className = `message ${role}`;
+    msg.textContent = text;
+    container.appendChild(msg);
+    container.scrollTop = container.scrollHeight;
+}
+
+// ── WS1: Durable Object ───────────────────────────────────────────────────
+
+async function connectToDO() {
+    try {
+        // 1. Get session UUID from Worker
+        const resp = await fetch(`${CONFIG.API_URL}/api/ws`);
+        if (!resp.ok) throw new Error(`Session init failed: ${resp.status}`);
+        const { session_id } = await resp.json();
+
+        // 2. Connect WebSocket to Durable Object
+        const wsUrl = CONFIG.API_URL.replace('https://', 'wss://') + `/api/ws/${session_id}`;
+        state.doWs = new WebSocket(wsUrl);
+
+        state.doWs.onopen = () => {
+            console.log('DO connected, sending start');
+            state.doWs.send(JSON.stringify({
+                type: 'start',
+                business_id: state.businessId,
+            }));
+        };
+
+        state.doWs.onmessage = (event) => {
+            const msg = JSON.parse(event.data);
+            handleDOMessage(msg);
+        };
+
+        state.doWs.onerror = (err) => {
+            console.error('DO WebSocket error:', err);
+            updateStatus('Connection error');
+        };
+
+        state.doWs.onclose = () => {
+            console.log('DO WebSocket closed');
+        };
+    } catch (err) {
+        console.error('DO connection error:', err);
+        updateStatus('Failed to connect');
+    }
+}
+
+// ── DO Message Handler ─────────────────────────────────────────────────────
+
+function handleDOMessage(msg) {
+    console.log('DO ←', msg.type, msg);
+
+    switch (msg.type) {
+        case 'welcome':
+            updateStatus(msg.text || 'Connected');
+            showStep('voice');
+            // After DO is connected, start AssemblyAI
+            connectToAssemblyAI();
+            break;
+
+        case 'state':
+            state.currentFsmState = msg.state;
+            state.currentQuestion = msg.question;
+            updateStatus(`Question ${msg.index + 1}/${msg.total}: ${msg.question}`);
+            // The agent will speak the question via its prompt/tools
+            break;
+
+        case 'request_camera':
+            updateStatus('Please scan your ID');
+            showStep('scan');
+            startCamera();
+            break;
+
+        case 'ocr_result':
+            state.ocrData = msg.fields;
+            displayOCRResult(msg.fields);
+            break;
+
+        case 'summary':
+            showSummary(msg.answers, msg.ocr);
+            break;
+
+        case 'checkin_complete':
+            showDone(msg.registration_id);
+            break;
+
+        case 'error':
+            updateStatus('Error: ' + msg.message);
+            break;
+
+        default:
+            console.log('Unknown DO message:', msg);
+    }
+}
+
+// ── WS2: AssemblyAI Voice Agent ────────────────────────────────────────────
+
+async function connectToAssemblyAI() {
+    try {
+        // 1. Fetch ephemeral token from Worker (never expose API key)
+        const resp = await fetch(`${CONFIG.API_URL}/api/token`);
+        if (!resp.ok) throw new Error(`Token fetch failed: ${resp.status}`);
+        const { token, agent_id } = await resp.json();
+
+        // 2. Two AudioContexts — Safari requires creation in user gesture,
+        //    but we're inside the init flow triggered by Telegram's ready()
+        state.captureCtx = new AudioContext({ sampleRate: WIRE_RATE });
+        state.playbackCtx = new AudioContext({ sampleRate: WIRE_RATE });
+        await Promise.all([state.captureCtx.resume(), state.playbackCtx.resume()]);
+
+        // 3. Playback worklet
+        state.playback = await addWorklet(state.playbackCtx, PLAYBACK_WORKLET, 'playback');
+        state.playback.connect(state.playbackCtx.destination);
+
+        // 4. Microphone
+        state.mic = await navigator.mediaDevices.getUserMedia({
+            audio: {
+                channelCount: 1,
+                echoCancellation: true,
+                noiseSuppression: false,
+                autoGainControl: false,
+            },
         });
-    });
+
+        // 5. Capture worklet
+        const capture = await addWorklet(state.captureCtx, CAPTURE_WORKLET, 'capture');
+        state.captureCtx.createMediaStreamSource(state.mic).connect(capture);
+
+        // 6. Connect WebSocket to AssemblyAI
+        const url = new URL(CONFIG.VOICE_AGENT_URL);
+        url.searchParams.set('token', token);
+        state.aaiWs = new WebSocket(url);
+
+        // Send captured audio to AssemblyAI
+        capture.port.onmessage = ({ data }) => {
+            if (!state.aaiReady || state.aaiWs?.readyState !== 1) return;
+            const bytes = new Uint8Array(data);
+            let binary = '';
+            for (let i = 0; i < bytes.length; i += 0x8000) {
+                binary += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+            }
+            state.aaiWs.send(JSON.stringify({ type: 'input.audio', audio: btoa(binary) }));
+        };
+
+        state.aaiWs.onopen = () => {
+            console.log('AAI connected, sending session.update');
+            state.aaiWs.send(JSON.stringify({
+                type: 'session.update',
+                session: { agent_id },
+            }));
+        };
+
+        state.aaiWs.onmessage = ({ data }) => {
+            const msg = JSON.parse(data);
+            handleAAILogic(msg);
+        };
+
+        state.aaiWs.onerror = (err) => {
+            console.error('AAI WebSocket error:', err);
+        };
+
+        state.aaiWs.onclose = () => {
+            console.log('AAI WebSocket closed');
+            state.aaiReady = false;
+        };
+
+    } catch (err) {
+        console.error('AssemblyAI connection error:', err);
+        addMessage('agent', 'Voice connection failed. You can still complete check-in visually.');
+    }
+}
+
+// ── AAI Message Handler ────────────────────────────────────────────────────
+
+function handleAAILogic(msg) {
+    switch (msg.type) {
+        case 'session.ready':
+            state.aaiReady = true;
+            console.log('AAI session ready');
+            updateStatus('Voice ready — speak your answers');
+            break;
+
+        case 'input.speech.started':
+            // Barge-in: stop agent playback
+            state.playback?.port.postMessage('stop');
+            break;
+
+        case 'reply.audio': {
+            // Decode base64 PCM16 and feed to playback worklet
+            const raw = atob(msg.data);
+            const bytes = new Uint8Array(raw.length);
+            for (let i = 0; i < raw.length; i++) bytes[i] = raw.charCodeAt(i);
+            state.playback?.port.postMessage(bytes.buffer, [bytes.buffer]);
+            break;
+        }
+
+        case 'reply.started':
+            updateStatus('Speaking...');
+            break;
+
+        case 'reply.done':
+            updateStatus('Listening...');
+            if (msg.status === 'interrupted') state.playback?.port.postMessage('stop');
+            break;
+
+        case 'transcript.user':
+            // User finished speaking — forward transcript to DO
+            addMessage('user', msg.text);
+            if (state.doWs?.readyState === 1) {
+                state.doWs.send(JSON.stringify({
+                    type: 'answer',
+                    text: msg.text,
+                }));
+            }
+            break;
+
+        case 'transcript.agent':
+            addMessage('agent', msg.text);
+            break;
+
+        case 'session.ended':
+            console.log('AAI session ended');
+            state.aaiReady = false;
+            break;
+
+        case 'session.error':
+            console.error('AAI error:', msg.message);
+            updateStatus('Voice error: ' + msg.message);
+            break;
+
+        default:
+            // transcript.user.delta, transcript.agent.delta, tool.call, etc.
+            break;
+    }
+}
+
+// ── Audio worklet helper ───────────────────────────────────────────────────
+
+async function addWorklet(ctx, code, name) {
+    const url = URL.createObjectURL(new Blob([code], { type: 'application/javascript' }));
+    try {
+        await ctx.audioWorklet.addModule(url);
+    } finally {
+        URL.revokeObjectURL(url);
+    }
+    return new AudioWorkletNode(ctx, name);
 }
 
 // ── Camera ─────────────────────────────────────────────────────────────────
 
 async function startCamera() {
     try {
-        // Stop existing stream
         if (state.mediaStream) {
             state.mediaStream.getTracks().forEach(t => t.stop());
         }
-        
-        const constraints = {
-            video: {
-                facingMode: state.cameraFacing,
-                width: { ideal: 1280 },
-                height: { ideal: 720 }
-            }
-        };
-        
-        state.mediaStream = await navigator.mediaDevices.getUserMedia(constraints);
+        state.mediaStream = await navigator.mediaDevices.getUserMedia({
+            video: { facingMode: state.cameraFacing, width: { ideal: 1280 }, height: { ideal: 720 } },
+        });
         elements.cameraPreview.srcObject = state.mediaStream;
-        
     } catch (err) {
         console.error('Camera error:', err);
-        alert('Could not access camera. Please check permissions.');
+        updateStatus('Camera access denied');
     }
 }
 
@@ -148,450 +510,235 @@ function stopCamera() {
     }
 }
 
-function captureImage() {
+// ── Capture + Upload (replaces Tesseract.js OCR) ───────────────────────────
+
+async function captureAndUpload() {
     const video = elements.cameraPreview;
     const canvas = elements.cameraCanvas;
-    
+
+    // 1. Draw video frame to canvas
     canvas.width = video.videoWidth;
     canvas.height = video.videoHeight;
-    
-    const ctx = canvas.getContext('2d');
-    ctx.drawImage(video, 0, 0);
-    
-    return canvas.toDataURL('image/jpeg', 0.8);
-}
+    canvas.getContext('2d').drawImage(video, 0, 0);
 
-// ── OCR with Tesseract.js ──────────────────────────────────────────────────
+    // 2. Convert to JPEG blob
+    const blob = await new Promise(resolve =>
+        canvas.toBlob(resolve, 'image/jpeg', 0.8)
+    );
 
-async function performOCR(imageData) {
-    elements.ocrLoading.classList.remove('hidden');
-    elements.ocrResult.classList.add('hidden');
-    
+    // Show loading
+    elements.ocrLoading?.classList.remove('hidden');
+
     try {
-        const result = await Tesseract.recognize(imageData, 'eng+spa', {
-            logger: info => {
-                if (info.status === 'recognizing text') {
-                    const pct = Math.round(info.progress * 100);
-                    elements.ocrLoading.querySelector('p').textContent = 
-                        `Scanning document... ${pct}%`;
-                }
-            }
+        // 3. Get presigned upload URL from Worker
+        const urlResp = await fetch(`${CONFIG.API_URL}/api/upload-url`);
+        if (!urlResp.ok) throw new Error('Failed to get upload URL');
+        const { upload_url, r2_key } = await urlResp.json();
+
+        // 4. Upload image via PUT to presigned URL
+        const putResp = await fetch(upload_url, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'image/jpeg' },
+            body: blob,
         });
-        
-        const rawText = result.data.text;
-        const confidence = result.data.confidence / 100;
-        
-        // Send to backend for parsing
-        const response = await fetch(`${CONFIG.API_URL}/api/scan`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ raw_text: rawText, confidence })
-        });
-        
-        const data = await response.json();
-        
-        if (data.success) {
-            state.ocrData = data;
-            displayOCRResult(data);
-        } else {
-            alert('OCR failed: ' + (data.error || 'Unknown error'));
+        if (!putResp.ok) throw new Error('Upload failed');
+
+        // 5. Send R2 key to DO for server-side OCR
+        if (state.doWs?.readyState === 1) {
+            state.doWs.send(JSON.stringify({ type: 'id_uploaded', r2_key }));
         }
-        
+
+        stopCamera();
+        updateStatus('Document uploaded, processing...');
+
     } catch (err) {
-        console.error('OCR error:', err);
-        alert('OCR failed. Please try again.');
+        console.error('Upload error:', err);
+        updateStatus('Upload failed, please try again');
     } finally {
-        elements.ocrLoading.classList.add('hidden');
+        elements.ocrLoading?.classList.add('hidden');
     }
 }
 
-function displayOCRResult(data) {
-    elements.ocrFields.innerHTML = '';
-    
-    const fields = data.fields || {};
-    const fieldLabels = {
+// ── OCR Result Display ─────────────────────────────────────────────────────
+
+function displayOCRResult(fields) {
+    const container = elements.ocrFields;
+    if (!container) return;
+    container.innerHTML = '';
+
+    const labels = {
         full_name: 'Name',
         id_number: 'ID Number',
         date_of_birth: 'Date of Birth',
         nationality: 'Nationality',
         expiry_date: 'Expiry Date',
-        address: 'Address'
+        address: 'Address',
     };
-    
-    for (const [key, value] of Object.entries(fields)) {
-        if (value) {
-            const row = document.createElement('div');
-            row.className = 'field-row';
-            row.innerHTML = `
-                <span class="field-label">${fieldLabels[key] || key}</span>
-                <span class="field-value">${value}</span>
-            `;
-            elements.ocrFields.appendChild(row);
+
+    for (const [key, value] of Object.entries(fields || {})) {
+        if (!value) continue;
+        const row = document.createElement('div');
+        row.className = 'field-row';
+        row.innerHTML = `<span class="field-label">${labels[key] || key}</span><span class="field-value">${value}</span>`;
+        container.appendChild(row);
+    }
+
+    elements.ocrResult?.classList.remove('hidden');
+    updateStatus('Document scanned — please confirm');
+}
+
+// ── Summary & Done ─────────────────────────────────────────────────────────
+
+function showSummary(answers, ocr) {
+    updateStatus('Review your check-in');
+    // Display summary in transcript area
+    let summary = '📋 Check-in Summary:\n';
+    if (answers) {
+        for (const [q, a] of Object.entries(answers)) {
+            summary += `• ${q}: ${a}\n`;
         }
     }
-    
-    // Add raw text if few fields extracted
-    if (Object.keys(fields).length < 2 && data.raw_text) {
-        const rawRow = document.createElement('div');
-        rawRow.className = 'field-row';
-        rawRow.innerHTML = `
-            <span class="field-label">Raw Text</span>
-            <span class="field-value" style="font-size: 12px; max-width: 200px; overflow: hidden; text-overflow: ellipsis;">${data.raw_text.substring(0, 50)}...</span>
-        `;
-        elements.ocrFields.appendChild(rawRow);
-    }
-    
-    elements.ocrResult.classList.remove('hidden');
-    
-    // Store visitor data from OCR
-    state.visitorData = { ...state.visitorData, ...fields };
-}
-
-// ── Voice Agent (AssemblyAI) ───────────────────────────────────────────────
-
-async function connectVoiceAgent() {
-    try {
-        // Get token from backend
-        const tokenRes = await fetch(`${CONFIG.API_URL}/token`);
-        const { token } = await tokenRes.json();
-        
-        if (!token) {
-            throw new Error('Could not get voice token');
+    if (ocr) {
+        summary += '\n🪪 Document:\n';
+        for (const [k, v] of Object.entries(ocr)) {
+            if (v) summary += `• ${k}: ${v}\n`;
         }
-        
-        // Connect to Voice Agent WebSocket
-        state.ws = new WebSocket(`${CONFIG.VOICE_AGENT_URL}?token=${token}`);
-        
-        state.ws.onopen = () => {
-            console.log('Voice agent connected');
-            
-            // Send session.update with agent_id
-            state.ws.send(JSON.stringify({
-                type: 'session.update',
-                session: {
-                    agent_id: CONFIG.AGENT_ID
-                }
-            }));
-        };
-        
-        state.ws.onmessage = (event) => {
-            const msg = JSON.parse(event.data);
-            handleVoiceMessage(msg);
-        };
-        
-        state.ws.onerror = (err) => {
-            console.error('Voice error:', err);
-        };
-        
-        state.ws.onclose = () => {
-            console.log('Voice agent disconnected');
-        };
-        
-    } catch (err) {
-        console.error('Voice connection error:', err);
-        // Fallback: show message to use phone
-        addMessage('agent', 'Voice connection failed. Please try again or use the manual form.');
     }
+    addMessage('agent', summary);
 }
 
-function handleVoiceMessage(msg) {
-    switch (msg.type) {
-        case 'session.ready':
-            console.log('Session ready');
-            break;
-            
-        case 'transcript.user':
-            addMessage('user', msg.transcript);
-            break;
-            
-        case 'transcript.agent':
-            addMessage('agent', msg.transcript);
-            break;
-            
-        case 'reply.audio':
-            // Play audio response
-            playAudio(msg.data);
-            break;
-            
-        case 'reply.done':
-            if (msg.status === 'interrupted') {
-                console.log('Agent interrupted');
-            }
-            break;
-            
-        case 'tool.call':
-            handleToolCall(msg);
-            break;
-            
-        default:
-            console.log('Voice message:', msg);
-    }
-}
-
-function handleToolCall(msg) {
-    // Handle tool calls from the voice agent
-    console.log('Tool call:', msg.name, msg.arguments);
-    
-    // Send tool result back
-    if (msg.name === 'scan_document') {
-        // OCR was done earlier, send the data
-        state.ws.send(JSON.stringify({
-            type: 'tool.result',
-            call_id: msg.call_id,
-            result: state.ocrData || { success: false, error: 'No document scanned' }
-        }));
-    } else if (msg.name === 'get_questionnaire') {
-        // Fetch questionnaire from backend
-        fetch(`${CONFIG.API_URL}/api/questionnaire?business_type=${state.businessType}`)
-            .then(res => res.json())
-            .then(data => {
-                state.ws.send(JSON.stringify({
-                    type: 'tool.result',
-                    call_id: msg.call_id,
-                    result: data
-                }));
-            });
-    } else if (msg.name === 'register_visitor') {
-        // Register visitor
-        fetch(`${CONFIG.API_URL}/api/register`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                visitor_data: state.visitorData,
-                business_type: state.businessType,
-                confirmed: true
-            })
-        })
-        .then(res => res.json())
-        .then(data => {
-            state.ws.send(JSON.stringify({
-                type: 'tool.result',
-                call_id: msg.call_id,
-                result: data
-            }));
-            
-            // Show confirmation
-            if (data.success) {
-                showConfirmation(data);
-            }
-        });
-    }
-}
-
-async function startRecording() {
-    try {
-        state.mediaStream = await navigator.mediaDevices.getUserMedia({ 
-            audio: { 
-                sampleRate: 24000,
-                channelCount: 1,
-                echoCancellation: true,
-                noiseSuppression: true
-            } 
-        });
-        
-        state.audioContext = new AudioContext({ sampleRate: 24000 });
-        const source = state.audioContext.createMediaStreamSource(state.mediaStream);
-        const processor = state.audioContext.createScriptProcessor(1024, 1, 1);
-        
-        processor.onaudioprocess = (e) => {
-            if (!state.isRecording || !state.ws) return;
-            
-            const inputData = e.inputBuffer.getChannelData(0);
-            const pcm16 = new Int16Array(inputData.length);
-            
-            for (let i = 0; i < inputData.length; i++) {
-                const s = Math.max(-1, Math.min(1, inputData[i]));
-                pcm16[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
-            }
-            
-            // Convert to base64 and send
-            const bytes = new Uint8Array(pcm16.buffer);
-            const base64 = btoa(String.fromCharCode(...bytes));
-            
-            state.ws.send(JSON.stringify({
-                type: 'input.audio',
-                audio: base64
-            }));
-        };
-        
-        source.connect(processor);
-        processor.connect(state.audioContext.destination);
-        
-        state.isRecording = true;
-        elements.btnVoice.classList.add('recording');
-        elements.voiceStatus.classList.add('active');
-        
-    } catch (err) {
-        console.error('Recording error:', err);
-        alert('Could not access microphone. Please check permissions.');
-    }
-}
-
-function stopRecording() {
-    state.isRecording = false;
-    
-    if (state.mediaStream) {
-        state.mediaStream.getTracks().forEach(t => t.stop());
-    }
-    
-    if (state.audioContext) {
-        state.audioContext.close();
-    }
-    
-    elements.btnVoice.classList.remove('recording');
-    elements.voiceStatus.classList.remove('active');
-}
-
-function playAudio(base64Audio) {
-    const audio = new Audio(`data:audio/wav;base64,${base64Audio}`);
-    audio.play().catch(err => console.error('Audio play error:', err));
-}
-
-// ── UI Helpers ─────────────────────────────────────────────────────────────
-
-function showStep(step) {
-    // Hide all steps
-    elements.stepBusiness.classList.add('hidden');
-    elements.stepScan.classList.add('hidden');
-    elements.stepVoice.classList.add('hidden');
-    elements.stepConfirm.classList.add('hidden');
-    
-    // Show selected step
-    switch (step) {
-        case 'business':
-            elements.stepBusiness.classList.remove('hidden');
-            break;
-        case 'scan':
-            elements.stepScan.classList.remove('hidden');
-            startCamera();
-            break;
-        case 'voice':
-            elements.stepVoice.classList.remove('hidden');
-            connectVoiceAgent();
-            break;
-        case 'confirm':
-            elements.stepConfirm.classList.remove('hidden');
-            break;
-    }
-    
-    // Update status
-    updateStatus(step);
-}
-
-function updateStatus(step) {
-    const statusText = {
-        'business': 'Select business type',
-        'scan': 'Scan your document',
-        'voice': 'Answer questions',
-        'confirm': 'Registration complete'
-    };
-    
-    elements.status.querySelector('.status-text').textContent = statusText[step] || 'Ready';
-}
-
-function addMessage(role, text) {
-    const msg = document.createElement('div');
-    msg.className = `message ${role}`;
-    msg.textContent = text;
-    elements.transcriptMessages.appendChild(msg);
-    elements.transcriptMessages.scrollTop = elements.transcriptMessages.scrollHeight;
-}
-
-function showConfirmation(data) {
-    elements.confirmMessage.textContent = data.message || 'Registration successful!';
-    elements.confirmId.textContent = `ID: ${data.submission_id}`;
+function showDone(registrationId) {
+    updateStatus('Check-in complete');
     showStep('confirm');
+    if (elements.confirmMessage) {
+        elements.confirmMessage.textContent = 'Your check-in is complete!';
+    }
+    if (elements.confirmId) {
+        elements.confirmId.textContent = `Registration ID: ${registrationId}`;
+    }
+    // Disconnect voice
+    cleanupAudio();
+}
+
+// ── Audio cleanup ──────────────────────────────────────────────────────────
+
+function cleanupAudio() {
+    state.aaiReady = false;
+    if (state.aaiWs?.readyState === 1) {
+        state.aaiWs.send(JSON.stringify({ type: 'session.end' }));
+        setTimeout(() => state.aaiWs?.close(), 2000);
+    }
+    state.playback?.port.postMessage('stop');
+    state.mic?.getTracks().forEach(t => t.stop());
+    state.captureCtx?.close();
+    state.playbackCtx?.close();
+    state.captureCtx = state.playbackCtx = state.playback = state.mic = null;
 }
 
 // ── Event Listeners ────────────────────────────────────────────────────────
 
 function initEventListeners() {
     // Camera switch
-    elements.btnSwitchCamera.addEventListener('click', () => {
+    elements.btnSwitchCamera?.addEventListener('click', () => {
         state.cameraFacing = state.cameraFacing === 'user' ? 'environment' : 'user';
         startCamera();
     });
-    
-    // Capture
-    elements.btnCapture.addEventListener('click', async () => {
-        const imageData = captureImage();
-        stopCamera();
-        await performOCR(imageData);
-    });
-    
+
+    // Capture + upload
+    elements.btnCapture?.addEventListener('click', captureAndUpload);
+
     // Rescan
-    elements.btnRescan.addEventListener('click', () => {
-        elements.ocrResult.classList.add('hidden');
+    elements.btnRescan?.addEventListener('click', () => {
+        elements.ocrResult?.classList.add('hidden');
         startCamera();
     });
-    
+
     // Confirm scan
-    elements.btnConfirmScan.addEventListener('click', () => {
+    elements.btnConfirmScan?.addEventListener('click', () => {
+        // Tell DO the scan is confirmed
+        if (state.doWs?.readyState === 1) {
+            state.doWs.send(JSON.stringify({ type: 'id_confirmed' }));
+        }
         showStep('voice');
     });
-    
-    // Voice button (hold to speak)
-    elements.btnVoice.addEventListener('mousedown', startRecording);
-    elements.btnVoice.addEventListener('touchstart', (e) => {
-        e.preventDefault();
-        startRecording();
-    });
-    
-    elements.btnVoice.addEventListener('mouseup', stopRecording);
-    elements.btnVoice.addEventListener('touchend', (e) => {
-        e.preventDefault();
-        stopRecording();
-    });
-    
-    // File upload (fallback for Telegram WebView)
-    const fileUpload = document.getElementById('file-upload');
+
+    // File upload fallback (for Telegram WebView)
+    const fileUpload = $('file-upload');
     if (fileUpload) {
         fileUpload.addEventListener('change', async (e) => {
-            const file = e.target.files[0];
+            const file = e.target.files?.[0];
             if (!file) return;
-            
-            // Convert to base64
-            const reader = new FileReader();
-            reader.onload = async () => {
+
+            elements.ocrLoading?.classList.remove('hidden');
+
+            try {
+                const urlResp = await fetch(`${CONFIG.API_URL}/api/upload-url`);
+                if (!urlResp.ok) throw new Error('Failed to get upload URL');
+                const { upload_url, r2_key } = await urlResp.json();
+
+                await fetch(upload_url, {
+                    method: 'PUT',
+                    headers: { 'Content-Type': file.type || 'image/jpeg' },
+                    body: file,
+                });
+
+                if (state.doWs?.readyState === 1) {
+                    state.doWs.send(JSON.stringify({ type: 'id_uploaded', r2_key }));
+                }
+
                 stopCamera();
-                await performOCR(reader.result);
-            };
-            reader.readAsDataURL(file);
+                updateStatus('Document uploaded, processing...');
+            } catch (err) {
+                console.error('File upload error:', err);
+                updateStatus('Upload failed, please try again');
+            } finally {
+                elements.ocrLoading?.classList.add('hidden');
+            }
         });
     }
-    
+
     // New visitor
-    elements.btnNewVisitor.addEventListener('click', () => {
-        state.businessType = null;
+    elements.btnNewVisitor?.addEventListener('click', () => {
+        state.answers = {};
         state.ocrData = null;
-        state.visitorData = {};
-        elements.transcriptMessages.innerHTML = '';
-        
-        // Reset business selection
-        document.querySelectorAll('.business-card').forEach(c => c.classList.remove('selected'));
-        
-        showStep('business');
+        elements.transcriptMessages && (elements.transcriptMessages.innerHTML = '');
+        // Disconnect and restart
+        cleanupAudio();
+        if (state.doWs) { state.doWs.close(); state.doWs = null; }
+        connectToDO();
+    });
+
+    // Cleanup on page unload
+    window.addEventListener('beforeunload', () => {
+        cleanupAudio();
+        state.doWs?.close();
     });
 }
 
 // ── Initialize ─────────────────────────────────────────────────────────────
 
-function init() {
-    console.log('Virtualobby initializing...');
-    
-    // Initialize Telegram if available
+async function init() {
+    console.log('Virtualobby dual-WS initializing...');
+
+    // 1. Telegram init + parse start_param
     initTelegram();
-    
-    // Initialize business selection
-    initBusinessSelection();
-    
-    // Initialize event listeners
+
+    // 2. If no Telegram start_param, use fallback
+    if (!state.businessId) {
+        state.businessId = 'clinic-main';
+    }
+
+    // 3. Init event listeners
     initEventListeners();
-    
-    // Show first step
-    showStep('business');
-    
-    console.log('Virtualobby ready');
+
+    // 4. Show voice step and connect both WebSockets
+    showStep('voice');
+    updateStatus('Connecting...');
+
+    // 5. Connect to DO first; DO welcome triggers AAI connection
+    await connectToDO();
+
+    console.log('Virtualobby initialized, business_id:', state.businessId);
 }
 
 // Start when DOM is ready
