@@ -1,5 +1,5 @@
 /**
- * IntakeAI — Voice Reception WebApp
+ * Virtualobby — Voice Reception WebApp
  * 
  * Works as:
  * 1. Telegram Mini App (inside Telegram)
@@ -554,7 +554,7 @@ function initEventListeners() {
 // ── Initialize ─────────────────────────────────────────────────────────────
 
 function init() {
-    console.log('IntakeAI initializing...');
+    console.log('Virtualobby initializing...');
     
     // Initialize Telegram if available
     initTelegram();
@@ -568,7 +568,7 @@ function init() {
     // Show first step
     showStep('business');
     
-    console.log('IntakeAI ready');
+    console.log('Virtualobby ready');
 }
 
 // Start when DOM is ready

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""IntakeAI Backend API + WebApp Server
+"""Virtualobby Backend API + WebApp Server
 
 Handles document scanning, questionnaire management, visitor registration,
 and serves the webapp frontend.
@@ -296,7 +296,7 @@ class IntakeHandler(BaseHTTPRequestHandler):
         if path == "/health":
             self._send_json(200, {
                 "status": "ok",
-                "service": "IntakeAI",
+                "service": "Virtualobby",
                 "templates": list(QUESTIONNAIRES.keys()),
                 "submissions": len(load_submissions()),
                 "assemblyai_configured": bool(AAI_API_KEY),
@@ -386,7 +386,7 @@ def main() -> None:
     port = int(os.environ.get("INTAKE_PORT", "8001"))
     server = ThreadingHTTPServer(("", port), IntakeHandler)
     
-    print(f"🏥 IntakeAI running on http://localhost:{port}")
+    print(f"🏥 Virtualobby running on http://localhost:{port}")
     print(f"   WebApp: http://localhost:{port}/")
     print(f"   Health: http://localhost:{port}/health")
     print(f"   Templates: http://localhost:{port}/api/templates")
@@ -396,7 +396,7 @@ def main() -> None:
         server.serve_forever()
     except KeyboardInterrupt:
         server.server_close()
-        print("\n👋 Shutting down IntakeAI")
+        print("\n👋 Shutting down Virtualobby")
 
 
 if __name__ == "__main__":

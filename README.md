@@ -2,7 +2,7 @@
 
 ---
 
-# IntakeAI — Universal Voice-Powered Reception Agent
+# Virtualobby — Universal Virtual Reception Agent
 
 [![Voice Agent API](https://img.shields.io/badge/docs-Voice%20Agent%20API-2545E6)](https://www.assemblyai.com/docs/voice-agents/voice-agent-api)
 [![Python](https://img.shields.io/badge/python-%E2%89%A53.9-3776AB?logo=python&logoColor=white)](https://www.python.org)
@@ -10,7 +10,7 @@
 
 > **Scan documents, ask questions, register visitors — all by voice.**
 
-IntakeAI is a universal reception agent powered by AssemblyAI's Voice Agent API. It combines voice interaction with document scanning (OCR) to automate visitor registration for any business.
+Virtualobby is a universal reception agent powered by AssemblyAI's Voice Agent API. It combines voice interaction with document scanning (OCR) to automate visitor registration for any business.
 
 ## 🎯 What it does
 
@@ -34,7 +34,7 @@ IntakeAI is a universal reception agent powered by AssemblyAI's Voice Agent API.
 
 The webapp works as:
 
-1. **Telegram Mini App** — Open @IntakeAI_bot in Telegram
+1. **Telegram Mini App** — Open @Virtualobby_bot in Telegram
 2. **Standalone Web Page** — Open the URL directly in any browser
 
 ### Features
@@ -50,8 +50,8 @@ The webapp works as:
 ### 1. Clone & configure
 
 ```sh
-git clone https://github.com/Alejdro83/intakeai.git
-cd intakeai
+git clone https://github.com/Alejdro83/virtualobby.git
+cd virtualobby
 cp .env.example .env
 # Add your ASSEMBLYAI_API_KEY to .env
 ```
@@ -60,7 +60,7 @@ cp .env.example .env
 
 ```sh
 python api/server.py
-# 🏥 IntakeAI running on http://localhost:8001
+# 🏥 Virtualobby running on http://localhost:8001
 ```
 
 ### 3. Open the webapp
@@ -72,7 +72,7 @@ http://localhost:8001/
 ## 📁 Project Structure
 
 ```
-intakeai/
+virtualobby/
 ├── agents/
 │   └── intake-clinic.jsonc    # Voice agent definition
 ├── api/
@@ -142,7 +142,7 @@ Edit `api/server.py` and add to the `QUESTIONNAIRES` dict:
 - **Deadline:** September 30, 2026
 - **Prize:** $10,000 ($5K cash + $5K AAI credits)
 
-### What makes IntakeAI different
+### What makes Virtualobby different
 
 - **Multimodal** — voice + vision (document scanning)
 - **Universal** — works for any business with configurable templates
