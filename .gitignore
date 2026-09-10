@@ -1,3 +1,5 @@
 node_modules/
 .env
 agents/*.env
+.wrangler/
+__pycache__/

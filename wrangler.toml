@@ -2,10 +2,13 @@ name = "virtualobby-api"
 main = "api/worker.js"
 compatibility_date = "2024-01-01"
 
-# KV namespace for storing submissions
-[[kv_namespaces]]
-binding = "VIRTUALOBBY_KV"
-id = "151d162bfda444c09eabfb155f2fb6d3"
+# D1 Database
+[[d1_databases]]
+binding = "DB"
+database_name = "virtualobby-db"
+database_id = "d3c8c0da-6133-479e-9214-ce05498061c3"
 
-[vars]
-ASSEMBLYAI_API_KEY = "57ba596d21d84db0b6a99b30def25e4d"
+# R2 Bucket for document photos
+[[r2_buckets]]
+binding = "R2_DOCS"
+bucket_name = "virtualobby-docs"
