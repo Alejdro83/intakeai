@@ -144,30 +144,72 @@ export default {
       }
     }
 
-    // ── Businesses: get single ──
-    const bizMatch = path.match(/^\/api\/businesses\/([^/]+)$/);
-    if (bizMatch && method === 'GET') {
-      const id = bizMatch[1];
+    // ── Businesses: get questions ──
+    const questionsMatch = path.match(/^\/api\/businesses\/([^/]+)\/questions$/);
+    if (questionsMatch) {
+      const bizId = questionsMatch[1];
       try {
-        const biz = await env.DB.prepare('SELECT * FROM businesses WHERE id = ?').bind(id).first();
-        if (!biz) return jsonResponse({ error: 'Business not found' }, 404);
-        return jsonResponse(biz);
+        if (method === 'GET') {
+          const biz = await env.DB.prepare('SELECT * FROM businesses WHERE id = ?').bind(bizId).first();
+          if (!biz) return jsonResponse({ error: 'Business not found' }, 404);
+          const { results } = await env.DB.prepare(
+            'SELECT * FROM business_questions WHERE business_id = ? ORDER BY order_index'
+          ).bind(bizId).all();
+          return jsonResponse({ business: biz, questions: results });
+        }
+        if (method === 'POST') {
+          const body = await request.json();
+          const qId = body.id || `q-${bizId}-${Date.now()}`;
+          await env.DB.prepare(
+            'INSERT INTO business_questions (id, business_id, field_key, question_text, order_index, validation_type) VALUES (?, ?, ?, ?, ?, ?)'
+          ).bind(qId, bizId, body.field_key, body.question_text, body.order_index, body.validation_type || 'text').run();
+          return jsonResponse({ ok: true, id: qId });
+        }
+        if (method === 'DELETE') {
+          await env.DB.prepare('DELETE FROM business_questions WHERE business_id = ?').bind(bizId).run();
+          return jsonResponse({ ok: true });
+        }
       } catch (e) {
         return jsonResponse({ error: e.message }, 500);
       }
     }
 
-    // ── Businesses: get questions ──
-    const questionsMatch = path.match(/^\/api\/businesses\/([^/]+)\/questions$/);
-    if (questionsMatch && method === 'GET') {
-      const id = questionsMatch[1];
+    // ── Businesses: create ──
+    if (path === '/api/businesses' && method === 'POST') {
       try {
-        const biz = await env.DB.prepare('SELECT * FROM businesses WHERE id = ?').bind(id).first();
-        if (!biz) return jsonResponse({ error: 'Business not found' }, 404);
-        const { results } = await env.DB.prepare(
-          'SELECT * FROM business_questions WHERE business_id = ? ORDER BY order_index'
-        ).bind(id).all();
-        return jsonResponse({ business: biz, questions: results });
+        const body = await request.json();
+        const id = body.id || body.name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+        await env.DB.prepare(
+          'INSERT INTO businesses (id, name, business_type, welcome_message, voice_persona, requires_id_scan) VALUES (?, ?, ?, ?, ?, ?)'
+        ).bind(id, body.name, body.business_type, body.welcome_message || 'Welcome!', body.voice_persona || 'anna', body.requires_id_scan ?? 1).run();
+        return jsonResponse({ ok: true, id });
+      } catch (e) {
+        return jsonResponse({ error: e.message }, 500);
+      }
+    }
+
+    // ── Businesses: update ──
+    const bizMatch = path.match(/^\/api\/businesses\/([^/]+)$/);
+    if (bizMatch) {
+      const id = bizMatch[1];
+      try {
+        if (method === 'GET') {
+          const biz = await env.DB.prepare('SELECT * FROM businesses WHERE id = ?').bind(id).first();
+          if (!biz) return jsonResponse({ error: 'Business not found' }, 404);
+          return jsonResponse(biz);
+        }
+        if (method === 'PUT') {
+          const body = await request.json();
+          await env.DB.prepare(
+            'UPDATE businesses SET name=?, business_type=?, welcome_message=?, voice_persona=?, requires_id_scan=? WHERE id=?'
+          ).bind(body.name, body.business_type, body.welcome_message, body.voice_persona, body.requires_id_scan ?? 1, id).run();
+          return jsonResponse({ ok: true });
+        }
+        if (method === 'DELETE') {
+          await env.DB.prepare('DELETE FROM business_questions WHERE business_id = ?').bind(id).run();
+          await env.DB.prepare('DELETE FROM businesses WHERE id = ?').bind(id).run();
+          return jsonResponse({ ok: true });
+        }
       } catch (e) {
         return jsonResponse({ error: e.message }, 500);
       }
