@@ -448,7 +448,7 @@ function handleAAILogic(msg) {
             addMessage('user', msg.text);
             if (state.doWs?.readyState === 1) {
                 state.doWs.send(JSON.stringify({
-                    type: 'answer',
+                    type: 'user_transcript',
                     text: msg.text,
                 }));
             }
