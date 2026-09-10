@@ -163,6 +163,13 @@ export class CheckinSession {
       type: "welcome",
       text: greetingText,
       voice_persona: this.session.businessConfig.voice_persona || "anna",
+      questions: this.session.questions.map(q => ({
+        id: q.id,
+        text: q.question_text,
+        type: q.validation_type,
+        field: q.field_key,
+      })),
+      requires_id_scan: this.session.businessConfig.requires_id_scan,
     });
 
     // Immediately transition to first question (or scanning if none)
