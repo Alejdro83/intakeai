@@ -1,0 +1,182 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <meta name="theme-color" content="#2563eb">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    
+    <title>IntakeAI — Voice Reception</title>
+    
+    <!-- Telegram Mini App SDK -->
+    <script src="https://telegram.org/js/telegram-web-app.js"></script>
+    
+    <!-- Tesseract.js for browser OCR -->
+    <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
+    
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <!-- Telegram Mini App init -->
+    <script>
+        // Initialize Telegram Mini App if available
+        if (window.Telegram && window.Telegram.WebApp) {
+            window.Telegram.WebApp.ready();
+            window.Telegram.WebApp.expand();
+            document.body.classList.add('telegram-webapp');
+        }
+    </script>
+
+    <!-- ── Header ───────────────────────────────────────────────── -->
+    <header class="header">
+        <div class="header-content">
+            <div class="logo">
+                <span class="logo-icon">🏥</span>
+                <h1>IntakeAI</h1>
+            </div>
+            <div class="status" id="status">
+                <span class="status-dot"></span>
+                <span class="status-text">Ready</span>
+            </div>
+        </div>
+    </header>
+
+    <!-- ── Main Content ─────────────────────────────────────────── -->
+    <main class="main">
+        <!-- Step 1: Select Business Type -->
+        <section class="step" id="step-business">
+            <div class="step-header">
+                <span class="step-number">1</span>
+                <h2>Welcome</h2>
+            </div>
+            <p class="step-description">What type of business are you visiting?</p>
+            
+            <div class="business-grid" id="business-grid">
+                <button class="business-card" data-type="clinic">
+                    <span class="business-icon">🏥</span>
+                    <span class="business-name">Clinic</span>
+                </button>
+                <button class="business-card" data-type="lawyer">
+                    <span class="business-icon">⚖️</span>
+                    <span class="business-name">Lawyer</span>
+                </button>
+                <button class="business-card" data-type="hotel">
+                    <span class="business-icon">🏨</span>
+                    <span class="business-name">Hotel</span>
+                </button>
+                <button class="business-card" data-type="office">
+                    <span class="business-icon">🏢</span>
+                    <span class="business-name">Office</span>
+                </button>
+                <button class="business-card" data-type="event">
+                    <span class="business-icon">🎪</span>
+                    <span class="business-name">Event</span>
+                </button>
+            </div>
+        </section>
+
+        <!-- Step 2: Scan Document -->
+        <section class="step hidden" id="step-scan">
+            <div class="step-header">
+                <span class="step-number">2</span>
+                <h2>Scan Document</h2>
+            </div>
+            <p class="step-description">Show your ID to the camera</p>
+            
+            <div class="camera-container">
+                <video id="camera-preview" autoplay playsinline></video>
+                <canvas id="camera-canvas" class="hidden"></canvas>
+                <div class="camera-overlay">
+                    <div class="scan-frame"></div>
+                </div>
+            </div>
+            
+            <div class="camera-controls">
+                <button class="btn btn-secondary" id="btn-switch-camera">
+                    🔄 Switch Camera
+                </button>
+                <button class="btn btn-primary btn-capture" id="btn-capture">
+                    📸 Capture
+                </button>
+            </div>
+            
+            <!-- OCR Result -->
+            <div class="ocr-result hidden" id="ocr-result">
+                <div class="result-header">
+                    <span class="result-icon">✅</span>
+                    <h3>Document Scanned</h3>
+                </div>
+                <div class="result-fields" id="ocr-fields"></div>
+                <div class="result-actions">
+                    <button class="btn btn-secondary" id="btn-rescan">
+                        🔄 Rescan
+                    </button>
+                    <button class="btn btn-primary" id="btn-confirm-scan">
+                        ✓ Confirm
+                    </button>
+                </div>
+            </div>
+            
+            <!-- Loading -->
+            <div class="loading hidden" id="ocr-loading">
+                <div class="spinner"></div>
+                <p>Scanning document...</p>
+            </div>
+        </section>
+
+        <!-- Step 3: Voice Interview -->
+        <section class="step hidden" id="step-voice">
+            <div class="step-header">
+                <span class="step-number">3</span>
+                <h2>Check-in Interview</h2>
+            </div>
+            
+            <div class="voice-container">
+                <!-- Transcript -->
+                <div class="transcript" id="transcript">
+                    <div class="transcript-messages" id="transcript-messages"></div>
+                </div>
+                
+                <!-- Voice Controls -->
+                <div class="voice-controls">
+                    <button class="btn btn-voice" id="btn-voice">
+                        <span class="voice-icon">🎤</span>
+                        <span class="voice-text">Hold to speak</span>
+                    </button>
+                    <div class="voice-status" id="voice-status">
+                        <span class="voice-wave"></span>
+                        <span class="voice-label">Listening...</span>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- Step 4: Confirmation -->
+        <section class="step hidden" id="step-confirm">
+            <div class="step-header">
+                <span class="step-number">4</span>
+                <h2>Confirm Registration</h2>
+            </div>
+            
+            <div class="confirm-card">
+                <div class="confirm-icon">✅</div>
+                <h3>Registration Complete</h3>
+                <p class="confirm-message" id="confirm-message"></p>
+                <div class="confirm-id" id="confirm-id"></div>
+                
+                <button class="btn btn-primary btn-block" id="btn-new-visitor">
+                    New Visitor
+                </button>
+            </div>
+        </section>
+    </main>
+
+    <!-- ── Footer ───────────────────────────────────────────────── -->
+    <footer class="footer">
+        <p>Powered by <strong>AssemblyAI</strong> Voice Agent API</p>
+    </footer>
+
+    <script src="app.js"></script>
+</body>
+</html>

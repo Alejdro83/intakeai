@@ -1,17 +1,21 @@
 #!/usr/bin/env python3
-"""IntakeAI Backend API
+"""IntakeAI Backend API + WebApp Server
 
-Handles document scanning (via browser-side Tesseract.js OCR or AssemblyAI LLM Gateway),
-questionnaire management, and visitor registration.
+Handles document scanning, questionnaire management, visitor registration,
+and serves the webapp frontend.
 
     python api/server.py
 
 Endpoints:
-    POST /api/scan          — Document scan (OCR result from browser)
-    GET  /api/questionnaire — Get questionnaire by business type
-    POST /api/register      — Register visitor
-    GET  /api/submissions   — List all submissions
+    GET  /                  — WebApp (index.html)
+    GET  /style.css         — WebApp styles
+    GET  /app.js            — WebApp JavaScript
     GET  /health            — Health check
+    GET  /api/templates     — List business templates
+    GET  /api/questionnaire — Get questionnaire by business type
+    GET  /api/submissions   — List all submissions
+    POST /api/scan          — Document scan
+    POST /api/register      — Register visitor
 """
 
 import base64
@@ -30,6 +34,7 @@ from typing import Any, Dict, List, Optional
 
 AAI_API_KEY = os.environ.get("ASSEMBLYAI_API_KEY", "")
 LLM_GATEWAY_URL = "https://llm-gateway.assemblyai.com/v1/chat/completions"
+WEBAPP_DIR = Path(__file__).parent.parent / "telegram" / "webapp"
 
 # ── Questionnaire Templates ────────────────────────────────────────────────
 
@@ -99,32 +104,23 @@ QUESTIONNAIRES: Dict[str, Dict[str, Any]] = {
 # ── Document Scanning ──────────────────────────────────────────────────────
 
 def scan_document_browser_ocr(ocr_data: Dict[str, Any]) -> Dict[str, Any]:
-    """Process OCR results from browser-side Tesseract.js.
-    
-    The browser captures the image, runs Tesseract.js OCR, and sends
-    the extracted text to this endpoint. We parse it into structured fields.
-    """
+    """Parse OCR results from browser-side Tesseract.js."""
     raw_text = ocr_data.get("raw_text", "")
     confidence = ocr_data.get("confidence", 0.0)
     
-    # Parse common document fields from raw text
     fields = {}
     lines = [l.strip() for l in raw_text.split("\n") if l.strip()]
     
-    # Simple heuristic parsing (improve with NLP in production)
+    import re
+    
     for i, line in enumerate(lines):
         lower = line.lower()
         
-        # Name detection
         if any(kw in lower for kw in ["nombre", "name", "nom:", "apellido"]):
-            # Next line might be the value
             if i + 1 < len(lines):
                 fields["full_name"] = lines[i + 1]
         
-        # ID number detection
         if any(kw in lower for kw in ["dni", "nif", "nie", "id:", "document", "passport", "no."]):
-            # Try to extract number from same line
-            import re
             numbers = re.findall(r'\d{5,}[A-Z]?', line)
             if numbers:
                 fields["id_number"] = numbers[0]
@@ -133,29 +129,20 @@ def scan_document_browser_ocr(ocr_data: Dict[str, Any]) -> Dict[str, Any]:
                 if numbers:
                     fields["id_number"] = numbers[0]
         
-        # Date detection
         if any(kw in lower for kw in ["nacimiento", "birth", "born", "fecha"]):
-            import re
             dates = re.findall(r'\d{2}[/-]\d{2}[/-]\d{4}', line)
             if dates:
                 fields["date_of_birth"] = dates[0]
         
-        # Nationality
         if any(kw in lower for kw in ["nacionalidad", "nationality", "nac."]):
             if i + 1 < len(lines):
                 fields["nationality"] = lines[i + 1]
     
-    # If no fields were parsed, try to extract from the full text
     if not fields and raw_text:
-        # Look for patterns in the full text
-        import re
-        
-        # Try to find ID numbers (5+ digits)
         id_matches = re.findall(r'\b\d{5,8}[A-Z]?\b', raw_text)
         if id_matches:
             fields["id_number"] = id_matches[0]
         
-        # Try to find dates
         date_matches = re.findall(r'\b\d{2}[/-]\d{2}[/-]\d{4}\b', raw_text)
         if date_matches:
             fields["date_of_birth"] = date_matches[0]
@@ -243,20 +230,48 @@ def save_submission(submission: Dict[str, Any]) -> str:
     return submission["id"]
 
 
+# ── Static File Serving ────────────────────────────────────────────────────
+
+STATIC_FILES = {
+    "/": ("index.html", "text/html"),
+    "/index.html": ("index.html", "text/html"),
+    "/style.css": ("style.css", "text/css"),
+    "/app.js": ("app.js", "text/javascript"),
+}
+
+
+def get_static_file(path: str) -> Optional[tuple]:
+    """Get static file content and content type."""
+    file_info = STATIC_FILES.get(path)
+    if not file_info:
+        return None
+    
+    filename, content_type = file_info
+    filepath = WEBAPP_DIR / filename
+    
+    if not filepath.exists():
+        return None
+    
+    return (filepath.read_bytes(), content_type)
+
+
 # ── HTTP Handler ───────────────────────────────────────────────────────────
 
 class IntakeHandler(BaseHTTPRequestHandler):
 
-    def _send_json(self, status: int, data: Any) -> None:
-        body = json.dumps(data).encode()
+    def _send(self, status: int, body: bytes, content_type: str) -> None:
         self.send_response(status)
-        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Access-Control-Allow-Origin", "*")
         self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
         self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization")
         self.end_headers()
         self.wfile.write(body)
+
+    def _send_json(self, status: int, data: Any) -> None:
+        body = json.dumps(data).encode()
+        self._send(status, body, "application/json")
 
     def _read_body(self) -> Dict[str, Any]:
         length = int(self.headers.get("Content-Length", 0))
@@ -269,7 +284,15 @@ class IntakeHandler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:
         path = self.path.split("?")[0]
-
+        
+        # Serve static files
+        static = get_static_file(path)
+        if static:
+            content, content_type = static
+            self._send(200, content, content_type)
+            return
+        
+        # API endpoints
         if path == "/health":
             self._send_json(200, {
                 "status": "ok",
@@ -309,7 +332,6 @@ class IntakeHandler(BaseHTTPRequestHandler):
         body = self._read_body()
 
         if path == "/api/scan":
-            # Two modes: browser OCR (sends raw_text) or LLM Gateway (sends image_data)
             if "raw_text" in body:
                 result = scan_document_browser_ocr(body)
             elif "image_data" in body:
@@ -364,17 +386,17 @@ def main() -> None:
     port = int(os.environ.get("INTAKE_PORT", "8001"))
     server = ThreadingHTTPServer(("", port), IntakeHandler)
     
-    print(f"🏥 IntakeAI API running on http://localhost:{port}")
+    print(f"🏥 IntakeAI running on http://localhost:{port}")
+    print(f"   WebApp: http://localhost:{port}/")
     print(f"   Health: http://localhost:{port}/health")
     print(f"   Templates: http://localhost:{port}/api/templates")
     print(f"   AssemblyAI: {'✅ configured' if AAI_API_KEY else '❌ not configured'}")
-    print(f"   OCR Mode: {'AssemblyAI LLM Gateway' if AAI_API_KEY else 'Browser Tesseract.js'}")
     
     try:
         server.serve_forever()
     except KeyboardInterrupt:
         server.server_close()
-        print("\n👋 Shutting down IntakeAI API")
+        print("\n👋 Shutting down IntakeAI")
 
 
 if __name__ == "__main__":
