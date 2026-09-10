@@ -247,8 +247,8 @@
         
         // Get lobby ID from URL
         function getLobbyId() {
-            const parts = window.location.pathname.split('/');
-            return parts[parts.length - 1] || null;
+            const urlParams = new URLSearchParams(window.location.search);
+            return urlParams.get('id') || null;
         }
         
         // Init
