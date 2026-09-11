@@ -277,7 +277,12 @@ async function connectToDO() {
         };
 
         state.doWs.onclose = () => {
-            console.log('DO WebSocket closed');
+            console.log('DO disconnected');
+            // Close AAI session to stop billing
+            if (state.aaiWs?.readyState === 1) {
+                state.aaiWs.send(JSON.stringify({ type: 'session.end' }));
+            }
+            cleanupAudio();
         };
     } catch (err) {
         console.error('DO connection error:', err);
@@ -359,7 +364,7 @@ async function connectToAssemblyAI() {
             audio: {
                 channelCount: 1,
                 echoCancellation: true,
-                noiseSuppression: false,
+                noiseSuppression: true,
                 autoGainControl: false,
             },
         });
@@ -399,9 +404,11 @@ async function connectToAssemblyAI() {
 FLOW:
 1. Greet the visitor warmly
 2. Ask each question below ONE AT A TIME, wait for answer, confirm briefly ("Got it", "Understood")
-3. After all questions${idScanNote ? ', ask for ID scan if needed' : ''}
-4. Summarize all collected information
-5. Ask for final confirmation
+3. After the visitor answers and you have confirmed their response, call the submit_answer tool with their answer
+4. Then move to the next question
+5. After all questions${idScanNote ? ', ask for ID scan if needed' : ''}
+6. Summarize all collected information
+7. Ask for final confirmation
 
 QUESTIONS TO ASK (in this exact order):
 ${questionsList}
@@ -411,7 +418,8 @@ RULES:
 - Speak in the visitor's language (detect from their first message)
 - Keep sentences short — this is voice, not text
 - Never generate your own questions — only ask the ones listed above
-- After the visitor answers, confirm briefly then move to next question
+- After the visitor answers, confirm briefly then call submit_answer with the extracted answer before moving on
+- Do NOT call submit_answer for partial speech, clarifications, or off-topic remarks — only when you have a confirmed answer to the current question
 - If visitor asks something off-topic, redirect: "Let's continue with the check-in"`;
 
             state.aaiWs.send(JSON.stringify({
@@ -420,6 +428,17 @@ RULES:
                     system_prompt: systemPrompt,
                     greeting: state.welcomeText || 'Welcome! Let me help you check in.',
                     voice: { voice_id: 'anna' },
+                    tools: [{
+                        name: 'submit_answer',
+                        description: 'Submit the visitor answer for the current question. Call this after the visitor answers and you have confirmed their response.',
+                        parameters: {
+                            type: 'object',
+                            properties: {
+                                answer: { type: 'string', description: 'The visitor answer to the current question' },
+                            },
+                            required: ['answer'],
+                        },
+                    }],
                 },
             }));
         };
@@ -478,14 +497,10 @@ function handleAAILogic(msg) {
             break;
 
         case 'transcript.user':
-            // User finished speaking — forward transcript to DO
+            // Display the transcript but do NOT send to DO.
+            // The agent calls submit_answer tool when the answer is confirmed.
             addMessage('user', msg.text);
-            if (state.doWs?.readyState === 1) {
-                state.doWs.send(JSON.stringify({
-                    type: 'user_transcript',
-                    text: msg.text,
-                }));
-            }
+            state.lastUserTranscript = msg.text;
             break;
 
         case 'transcript.agent':
@@ -502,8 +517,30 @@ function handleAAILogic(msg) {
             updateStatus('Voice error: ' + msg.message);
             break;
 
+        case 'tool.call':
+            if (msg.tool_name === 'submit_answer') {
+                const answer = msg.arguments?.answer || '';
+                console.log('Agent submitted answer:', answer);
+                // Forward to DO as user_transcript to advance the question
+                if (state.doWs?.readyState === 1) {
+                    state.doWs.send(JSON.stringify({
+                        type: 'user_transcript',
+                        text: answer,
+                    }));
+                }
+                // Send tool result back to AssemblyAI
+                if (state.aaiWs?.readyState === 1) {
+                    state.aaiWs.send(JSON.stringify({
+                        type: 'tool.result',
+                        tool_call_id: msg.tool_call_id,
+                        result: { success: true },
+                    }));
+                }
+            }
+            break;
+
         default:
-            // transcript.user.delta, transcript.agent.delta, tool.call, etc.
+            // transcript.user.delta, transcript.agent.delta, etc.
             break;
     }
 }
