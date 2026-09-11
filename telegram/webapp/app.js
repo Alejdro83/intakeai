@@ -427,8 +427,9 @@ RULES:
                 session: {
                     system_prompt: systemPrompt,
                     greeting: state.welcomeText || 'Welcome! Let me help you check in.',
-                    voice: { voice_id: 'anna' },
+                    output: { type: 'audio', voice: 'anna' },
                     tools: [{
+                        type: 'function',
                         name: 'submit_answer',
                         description: 'Submit the visitor answer for the current question. Call this after the visitor answers and you have confirmed their response.',
                         parameters: {
@@ -518,7 +519,7 @@ function handleAAILogic(msg) {
             break;
 
         case 'tool.call':
-            if (msg.tool_name === 'submit_answer') {
+            if (msg.name === 'submit_answer') {
                 const answer = msg.arguments?.answer || '';
                 console.log('Agent submitted answer:', answer);
                 // Forward to DO as user_transcript to advance the question
@@ -532,8 +533,8 @@ function handleAAILogic(msg) {
                 if (state.aaiWs?.readyState === 1) {
                     state.aaiWs.send(JSON.stringify({
                         type: 'tool.result',
-                        tool_call_id: msg.tool_call_id,
-                        result: { success: true },
+                        call_id: msg.call_id,
+                        result: JSON.stringify({ success: true }),
                     }));
                 }
             }
