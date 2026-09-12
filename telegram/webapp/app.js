@@ -214,8 +214,10 @@ function handleDOMessage(msg) {
             state.businessName = msg.business_name || state.businessName;
             dbg('Questions count: ' + state.questions.length + ' ocrData: ' + JSON.stringify(state.ocrData));
             showStep('voice');
-            // If voice is already connected and we have OCR data, send it via session.update
-            if (state.aaiReady && state.ocrData && Object.keys(state.ocrData).length > 0) {
+            // Store that we have OCR data to send when voice is ready
+            state.pendingOcrData = state.ocrData && Object.keys(state.ocrData).length > 0;
+            // If voice is already connected, send OCR data now
+            if (state.aaiReady && state.pendingOcrData) {
                 dbg('Voice already connected, sending OCR data via session.update');
                 const ocrName = state.ocrData.name || '';
                 const ocrFields = Object.entries(state.ocrData).filter(([k, v]) => v && k !== 'name').map(([k, v]) => `${k}: ${v}`).join(', ');
@@ -523,6 +525,49 @@ function handleAAILogic(msg) {
             state.aaiReady = true;
             state.voiceConnecting = false;
             updateStatus('Listening...');
+            // If we have pending OCR data, send it now
+            if (state.pendingOcrData && state.ocrData && Object.keys(state.ocrData).length > 0) {
+                dbg('Sending pending OCR data via session.update');
+                state.pendingOcrData = false;
+                const ocrName = state.ocrData.name || '';
+                const ocrFields = Object.entries(state.ocrData).filter(([k, v]) => v && k !== 'name').map(([k, v]) => `${k}: ${v}`).join(', ');
+                const questionsList = (state.questions || []).map((q, i) => `${i + 1}. \"${q.text}\" (field: ${q.field})`).join('\n');
+                const updatedPrompt = `You are a friendly virtual reception assistant at ${state.businessName || 'this office'}.
+
+OCR DATA from visitor ID:
+- Name: ${ocrName}${ocrFields ? '\n- ' + ocrFields : ''}
+
+Read back this data and ask \"Is this correct?\" Wait for confirmation.
+
+QUESTIONS (ask ONE AT A TIME, after confirming OCR data):
+${questionsList}
+
+FLOW:
+1. Read OCR data, ask \"Is this correct?\"
+2. After confirmation, ask each question
+3. Call submit_answer after each answer
+4. Summarize at the end
+
+RULES:
+- Speak in the visitor's language
+- Keep sentences short
+- Never generate your own questions`;
+                state.aaiWs.send(JSON.stringify({
+                    type: 'session.update',
+                    session: {
+                        system_prompt: updatedPrompt,
+                        greeting: `I see from your ID that your name is ${ocrName}. Let me confirm your details.`,
+                        output: { type: 'audio', voice: 'anna' },
+                        tools: [{
+                            type: 'function',
+                            name: 'submit_answer',
+                            description: 'Submit the visitor answer for the current question.',
+                            parameters: { type: 'object', properties: { answer: { type: 'string' } }, required: ['answer'] },
+                        }],
+                    },
+                }));
+                dbg('Pending OCR data sent ✓');
+            }
             break;
 
         case 'input.speech.started':
