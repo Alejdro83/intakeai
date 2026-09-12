@@ -154,7 +154,7 @@ export class CheckinSession {
         }
         const base64 = btoa(binary);
 
-        const result = await this.env.AI.run("@cf/meta/llama-3.2-11b-vision", {
+        const result = await this.env.AI.run("@cf/meta/llama-3.2-11b-vision-instruct", {
           image: base64,
           prompt:
             "Extract the following fields from this document in JSON format: " +
