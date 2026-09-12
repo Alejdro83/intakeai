@@ -5,7 +5,7 @@
  *   WS1: Durable Object (state management, questions, OCR results)
  *   WS2: AssemblyAI Voice Agent (voice/audio capture + playback)
  *
- * Flow: parse start_param → connect DO → camera/OCR → fetch token → connect AAI →
+ * Flow: parse start_param → connect DO → file upload/OCR → fetch token → connect AAI →
  *       voice confirmation of OCR data → voice Q&A → summary → done
  */
 
@@ -152,21 +152,19 @@ const PLAYBACK_WORKLET = `
 const state = {
     businessId: null,
     businessName: '',
-    doWs: null,                // Durable Object WebSocket
-    aaiWs: null,               // AssemblyAI Voice Agent WebSocket
-    captureCtx: null,          // AudioContext for mic capture
-    playbackCtx: null,         // AudioContext for playback
-    playback: null,            // PlaybackWorkletNode
-    mic: null,                 // MediaStream
-    aaiReady: false,           // AssemblyAI session.ready received
+    doWs: null,
+    aaiWs: null,
+    captureCtx: null,
+    playbackCtx: null,
+    playback: null,
+    mic: null,
+    aaiReady: false,
     currentFsmState: 'idle',
     currentQuestion: null,
     questions: [],
     answers: {},
     ocrData: null,
     requiresIdScan: false,
-    cameraFacing: 'environment',
-    mediaStream: null,         // camera stream (separate from mic)
 };
 
 // ── DOM Elements ───────────────────────────────────────────────────────────
@@ -177,15 +175,10 @@ const elements = {
     stepScan: $('step-scan'),
     stepVoice: $('step-voice'),
     stepConfirm: $('step-confirm'),
-    cameraPreview: $('camera-preview'),
-    cameraCanvas: $('camera-canvas'),
-    btnSwitchCamera: $('btn-switch-camera'),
-    btnCapture: $('btn-capture'),
     ocrResult: $('ocr-result'),
     ocrFields: $('ocr-fields'),
     ocrLoading: $('ocr-loading'),
-    btnRescan: $('btn-rescan'),
-    btnConfirmScan: $('btn-confirm-scan'),
+    scanActions: $('scan-actions'),
     transcriptMessages: $('transcript-messages'),
     statusDot: $('status-dot'),
     statusText: $('status-text'),
@@ -230,7 +223,6 @@ function initTelegram() {
     tg.ready();
     tg.expand();
 
-    // Parse start_param for business_id
     const initData = tg.initDataUnsafe || {};
     const startParam = initData.start_param || '';
     if (startParam) {
@@ -278,30 +270,25 @@ function handleDOMessage(msg) {
             state.requiresIdScan = msg.requires_id_scan;
             state.questions = msg.questions || [];
             updateStatus(msg.text || 'Connected');
-            // If ID scan required, camera will open via request_camera
-            // Otherwise, questions_ready will trigger voice connection
             break;
 
         case 'request_camera':
-            // ID scan required — show camera BEFORE voice
+            // ID scan required — show file upload buttons
             updateStatus('Please scan your ID');
             showStep('scan');
-            startCamera();
             break;
 
         case 'ocr_result':
-            // OCR done — show results in scan step
+            // OCR done — show results
             state.ocrData = msg.fields;
             displayOCRResult(msg.fields);
             break;
 
         case 'questions_ready':
-            // All data loaded — now connect voice with OCR data
+            // All data loaded — connect voice with OCR data
             state.questions = msg.questions || state.questions;
             state.ocrData = msg.ocr_data || state.ocrData;
             state.businessName = msg.business_name || state.businessName;
-            // Stop camera if still running, switch to voice
-            stopCamera();
             showStep('voice');
             connectToAssemblyAI();
             break;
@@ -329,6 +316,44 @@ function handleDOMessage(msg) {
     }
 }
 
+// ── File Upload Handler ────────────────────────────────────────────────────
+
+async function handleFileUpload(file) {
+    if (!file) return;
+
+    elements.ocrLoading?.classList.remove('hidden');
+    elements.scanActions?.classList.add('hidden');
+
+    try {
+        // 1. Get presigned upload URL from Worker
+        const urlResp = await fetch(`${CONFIG.API_URL}/api/upload-url`);
+        if (!urlResp.ok) throw new Error('Failed to get upload URL');
+        const { upload_url, r2_key } = await urlResp.json();
+
+        // 2. Upload image via PUT to presigned URL
+        const putResp = await fetch(upload_url, {
+            method: 'PUT',
+            headers: { 'Content-Type': file.type || 'image/jpeg' },
+            body: file,
+        });
+        if (!putResp.ok) throw new Error('Upload failed');
+
+        // 3. Send R2 key to DO for server-side OCR
+        if (state.doWs?.readyState === 1) {
+            state.doWs.send(JSON.stringify({ type: 'id_uploaded', r2_key }));
+        }
+
+        updateStatus('Document uploaded, processing...');
+
+    } catch (err) {
+        console.error('Upload error:', err);
+        updateStatus('Upload failed, please try again');
+        elements.scanActions?.classList.remove('hidden');
+    } finally {
+        elements.ocrLoading?.classList.add('hidden');
+    }
+}
+
 // ── AssemblyAI Voice Agent ─────────────────────────────────────────────────
 
 async function connectToAssemblyAI() {
@@ -350,7 +375,6 @@ async function connectToAssemblyAI() {
         const source = state.captureCtx.createMediaStreamSource(stream);
         const capture = await addWorklet(state.captureCtx, CAPTURE_WORKLET, 'capture');
         source.connect(capture);
-        // Connect to destination to keep the graph alive (worklet won't process otherwise)
         capture.connect(state.captureCtx.destination);
 
         state.playback = await addWorklet(state.playbackCtx, PLAYBACK_WORKLET, 'playback');
@@ -373,7 +397,6 @@ async function connectToAssemblyAI() {
         state.aaiWs.onopen = () => {
             console.log('AAI connected, sending session.update');
 
-            // Build system prompt — personalized with OCR data if available
             const ocrName = state.ocrData?.name || '';
             const ocrFields = state.ocrData
                 ? Object.entries(state.ocrData)
@@ -467,12 +490,10 @@ function handleAAILogic(msg) {
             break;
 
         case 'input.speech.started':
-            // Barge-in: stop agent playback
             state.playback?.port.postMessage('stop');
             break;
 
         case 'reply.audio': {
-            // Decode base64 PCM16 and feed to playback worklet
             const raw = atob(msg.data);
             const bytes = new Uint8Array(raw.length);
             for (let i = 0; i < raw.length; i++) bytes[i] = raw.charCodeAt(i);
@@ -512,14 +533,12 @@ function handleAAILogic(msg) {
             if (msg.name === 'submit_answer') {
                 const answer = msg.arguments?.answer || '';
                 console.log('Agent submitted answer:', answer);
-                // Forward to DO as user_transcript to advance the question
                 if (state.doWs?.readyState === 1) {
                     state.doWs.send(JSON.stringify({
                         type: 'user_transcript',
                         text: answer,
                     }));
                 }
-                // Send tool result back to AssemblyAI
                 if (state.aaiWs?.readyState === 1) {
                     state.aaiWs.send(JSON.stringify({
                         type: 'tool.result',
@@ -545,84 +564,6 @@ async function addWorklet(ctx, code, name) {
         URL.revokeObjectURL(url);
     }
     return new AudioWorkletNode(ctx, name);
-}
-
-// ── Camera ─────────────────────────────────────────────────────────────────
-
-async function startCamera() {
-    try {
-        if (state.mediaStream) {
-            state.mediaStream.getTracks().forEach(t => t.stop());
-        }
-        state.mediaStream = await navigator.mediaDevices.getUserMedia({
-            video: { facingMode: state.cameraFacing, width: { ideal: 1280 }, height: { ideal: 720 } },
-        });
-        elements.cameraPreview.srcObject = state.mediaStream;
-    } catch (err) {
-        console.error('Camera error:', err);
-        updateStatus('Camera access denied');
-        // If camera fails, skip to voice
-        showStep('voice');
-        if (state.doWs?.readyState === 1) {
-            state.doWs.send(JSON.stringify({ type: 'id_uploaded', r2_key: 'skipped' }));
-        }
-    }
-}
-
-function stopCamera() {
-    if (state.mediaStream) {
-        state.mediaStream.getTracks().forEach(t => t.stop());
-        state.mediaStream = null;
-    }
-}
-
-// ── Capture + Upload ──────────────────────────────────────────────────────
-
-async function captureAndUpload() {
-    const video = elements.cameraPreview;
-    const canvas = elements.cameraCanvas;
-
-    // 1. Draw video frame to canvas
-    canvas.width = video.videoWidth;
-    canvas.height = video.videoHeight;
-    canvas.getContext('2d').drawImage(video, 0, 0);
-
-    // 2. Convert to JPEG blob
-    const blob = await new Promise(resolve =>
-        canvas.toBlob(resolve, 'image/jpeg', 0.8)
-    );
-
-    // Show loading
-    elements.ocrLoading?.classList.remove('hidden');
-
-    try {
-        // 3. Get presigned upload URL from Worker
-        const urlResp = await fetch(`${CONFIG.API_URL}/api/upload-url`);
-        if (!urlResp.ok) throw new Error('Failed to get upload URL');
-        const { upload_url, r2_key } = await urlResp.json();
-
-        // 4. Upload image via PUT to presigned URL
-        const putResp = await fetch(upload_url, {
-            method: 'PUT',
-            headers: { 'Content-Type': 'image/jpeg' },
-            body: blob,
-        });
-        if (!putResp.ok) throw new Error('Upload failed');
-
-        // 5. Send R2 key to DO for server-side OCR
-        if (state.doWs?.readyState === 1) {
-            state.doWs.send(JSON.stringify({ type: 'id_uploaded', r2_key }));
-        }
-
-        stopCamera();
-        updateStatus('Document uploaded, processing...');
-
-    } catch (err) {
-        console.error('Upload error:', err);
-        updateStatus('Upload failed, please try again');
-    } finally {
-        elements.ocrLoading?.classList.add('hidden');
-    }
 }
 
 // ── OCR Result Display ─────────────────────────────────────────────────────
@@ -703,53 +644,19 @@ function cleanupAudio() {
 // ── Event Listeners ────────────────────────────────────────────────────────
 
 function initEventListeners() {
-    // Camera switch
-    elements.btnSwitchCamera?.addEventListener('click', () => {
-        state.cameraFacing = state.cameraFacing === 'user' ? 'environment' : 'user';
-        startCamera();
-    });
+    // File upload — camera capture (primary for Telegram WebView)
+    const fileCamera = $('file-upload-camera');
+    if (fileCamera) {
+        fileCamera.addEventListener('change', (e) => {
+            handleFileUpload(e.target.files?.[0]);
+        });
+    }
 
-    // Capture + upload
-    elements.btnCapture?.addEventListener('click', captureAndUpload);
-
-    // Rescan
-    elements.btnRescan?.addEventListener('click', () => {
-        elements.ocrResult?.classList.add('hidden');
-        startCamera();
-    });
-
-    // File upload fallback (for Telegram WebView where camera may not work)
-    const fileUpload = $('file-upload');
-    if (fileUpload) {
-        fileUpload.addEventListener('change', async (e) => {
-            const file = e.target.files?.[0];
-            if (!file) return;
-
-            elements.ocrLoading?.classList.remove('hidden');
-
-            try {
-                const urlResp = await fetch(`${CONFIG.API_URL}/api/upload-url`);
-                if (!urlResp.ok) throw new Error('Failed to get upload URL');
-                const { upload_url, r2_key } = await urlResp.json();
-
-                await fetch(upload_url, {
-                    method: 'PUT',
-                    headers: { 'Content-Type': file.type || 'image/jpeg' },
-                    body: file,
-                });
-
-                if (state.doWs?.readyState === 1) {
-                    state.doWs.send(JSON.stringify({ type: 'id_uploaded', r2_key }));
-                }
-
-                stopCamera();
-                updateStatus('Document uploaded, processing...');
-            } catch (err) {
-                console.error('File upload error:', err);
-                updateStatus('Upload failed, please try again');
-            } finally {
-                elements.ocrLoading?.classList.add('hidden');
-            }
+    // File upload — gallery
+    const fileGallery = $('file-upload-gallery');
+    if (fileGallery) {
+        fileGallery.addEventListener('change', (e) => {
+            handleFileUpload(e.target.files?.[0]);
         });
     }
 
@@ -773,29 +680,21 @@ function initEventListeners() {
 // ── Initialize ─────────────────────────────────────────────────────────────
 
 async function init() {
-    console.log('Virtualobby dual-WS initializing...');
+    console.log('Virtualobby initializing...');
 
-    // 1. Telegram init + parse start_param
     initTelegram();
 
-    // 2. If no Telegram start_param, use fallback
     if (!state.businessId) {
         state.businessId = 'clinic-main';
     }
 
-    // 3. Init event listeners
     initEventListeners();
-
-    // 4. Show connecting status
     updateStatus('Connecting...');
-
-    // 5. Connect to DO — DO welcome triggers the rest of the flow
     await connectToDO();
 
     console.log('Virtualobby initialized, business_id:', state.businessId);
 }
 
-// Start when DOM is ready
 if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', init);
 } else {

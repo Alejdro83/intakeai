@@ -605,3 +605,68 @@ body.telegram-webapp {
 .hidden {
     display: none !important;
 }
+
+/* ── Scan Actions ──────────────────────────────────────────────────── */
+
+.scan-actions {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    padding: 24px 0;
+}
+
+.btn-scan-main {
+    width: 100%;
+    padding: 16px 24px;
+    font-size: 18px;
+    font-weight: 600;
+    border-radius: 12px;
+    text-align: center;
+    cursor: pointer;
+    transition: transform 0.1s, opacity 0.2s;
+}
+
+.btn-scan-main:active {
+    transform: scale(0.98);
+}
+
+.ocr-result {
+    margin-top: 16px;
+    padding: 16px;
+    background: var(--surface-alt, #f5f3eb);
+    border-radius: 8px;
+}
+
+.result-header {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 12px;
+}
+
+.result-icon {
+    font-size: 20px;
+}
+
+.result-fields {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.field-row {
+    display: flex;
+    justify-content: space-between;
+    padding: 8px 0;
+    border-bottom: 1px solid var(--border, #dad7cb);
+}
+
+.field-label {
+    font-weight: 500;
+    color: var(--text-muted, #777673);
+}
+
+.field-value {
+    font-weight: 600;
+    color: var(--text-dark, #1d1b16);
+}

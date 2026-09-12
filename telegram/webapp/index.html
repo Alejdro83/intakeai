@@ -47,27 +47,25 @@
                 <span class="step-number">1</span>
                 <h2>Scan Document</h2>
             </div>
-            <p class="step-description">Show your ID to the camera</p>
+            <p class="step-description">Take a photo of your ID document</p>
             
-            <div class="camera-container">
-                <video id="camera-preview" autoplay playsinline></video>
-                <canvas id="camera-canvas" class="hidden"></canvas>
-                <div class="camera-overlay">
-                    <div class="scan-frame"></div>
-                </div>
+            <!-- Primary: native file input with capture (works in Telegram WebView) -->
+            <div class="scan-actions" id="scan-actions">
+                <label class="btn btn-primary btn-scan-main" for="file-upload-camera">
+                    📸 Take Photo
+                </label>
+                <input type="file" id="file-upload-camera" accept="image/*" capture="environment" style="display: none;">
+                
+                <label class="btn btn-secondary btn-scan-main" for="file-upload-gallery">
+                    🖼️ Choose from Gallery
+                </label>
+                <input type="file" id="file-upload-gallery" accept="image/*" style="display: none;">
             </div>
             
-            <div class="camera-controls">
-                <button class="btn btn-secondary" id="btn-switch-camera">
-                    🔄 Switch Camera
-                </button>
-                <button class="btn btn-primary btn-capture" id="btn-capture">
-                    📸 Capture
-                </button>
-                <label class="btn btn-secondary" for="file-upload" style="cursor: pointer;">
-                    📁 Upload Photo
-                </label>
-                <input type="file" id="file-upload" accept="image/*" capture="environment" style="display: none;">
+            <!-- Loading -->
+            <div class="loading hidden" id="ocr-loading">
+                <div class="spinner"></div>
+                <p>Scanning document...</p>
             </div>
             
             <!-- OCR Result -->
@@ -77,20 +75,6 @@
                     <h3>Document Scanned</h3>
                 </div>
                 <div class="result-fields" id="ocr-fields"></div>
-                <div class="result-actions">
-                    <button class="btn btn-secondary" id="btn-rescan">
-                        🔄 Rescan
-                    </button>
-                    <button class="btn btn-primary" id="btn-confirm-scan">
-                        ✓ Confirm
-                    </button>
-                </div>
-            </div>
-            
-            <!-- Loading -->
-            <div class="loading hidden" id="ocr-loading">
-                <div class="spinner"></div>
-                <p>Scanning document...</p>
             </div>
         </section>
 
