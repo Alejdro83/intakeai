@@ -185,16 +185,12 @@ function handleDOMessage(msg) {
             const ht = $('header-title');
             if (ht) ht.textContent = `Welcome to ${state.businessName}`;
             updateStatus(`Welcome to ${state.businessName}!`);
-            if (!state.requiresIdScan) {
-                dbg('No ID scan required → going straight to voice');
-                showStep('voice');
-                connectToAssemblyAI().catch(err => {
-                    dbg('Voice failed: ' + err.message);
-                    updateStatus('Voice failed: ' + err.message);
-                });
-            } else {
-                dbg('ID scan required → waiting for request_camera');
-            }
+            // Connect voice immediately so Anna speaks the greeting
+            showStep(state.requiresIdScan ? 'scan' : 'voice');
+            connectToAssemblyAI().catch(err => {
+                dbg('Voice failed: ' + err.message);
+                updateStatus('Voice failed: ' + err.message);
+            });
             break;
 
         case 'request_camera':
@@ -217,12 +213,56 @@ function handleDOMessage(msg) {
             state.ocrData = msg.ocr_data || state.ocrData;
             state.businessName = msg.business_name || state.businessName;
             dbg('Questions count: ' + state.questions.length + ' ocrData: ' + JSON.stringify(state.ocrData));
-            updateStatus('Connecting voice...');
             showStep('voice');
-            connectToAssemblyAI().catch(err => {
-                dbg('Voice failed: ' + err.message);
-                updateStatus('Voice failed: ' + err.message);
-            });
+            // If voice is already connected and we have OCR data, send it via session.update
+            if (state.aaiReady && state.ocrData && Object.keys(state.ocrData).length > 0) {
+                dbg('Voice already connected, sending OCR data via session.update');
+                const ocrName = state.ocrData.name || '';
+                const ocrFields = Object.entries(state.ocrData).filter(([k, v]) => v && k !== 'name').map(([k, v]) => `${k}: ${v}`).join(', ');
+                const questionsList = (state.questions || []).map((q, i) => `${i + 1}. \"${q.text}\" (field: ${q.field})`).join('\n');
+                const updatedPrompt = `You are a friendly virtual reception assistant at ${state.businessName || 'this office'}.
+
+OCR DATA from visitor ID:
+- Name: ${ocrName}${ocrFields ? '\n- ' + ocrFields : ''}
+
+Read back this data and ask \"Is this correct?\" Wait for confirmation.
+
+QUESTIONS (ask ONE AT A TIME, after confirming OCR data):
+${questionsList}
+
+FLOW:
+1. Read OCR data, ask \"Is this correct?\"
+2. After confirmation, ask each question
+3. Call submit_answer after each answer
+4. Summarize at the end
+
+RULES:
+- Speak in the visitor's language
+- Keep sentences short
+- Never generate your own questions`;
+                state.aaiWs.send(JSON.stringify({
+                    type: 'session.update',
+                    session: {
+                        system_prompt: updatedPrompt,
+                        greeting: `I see from your ID that your name is ${ocrName}. Let me confirm your details.`,
+                        output: { type: 'audio', voice: 'anna' },
+                        tools: [{
+                            type: 'function',
+                            name: 'submit_answer',
+                            description: 'Submit the visitor answer for the current question.',
+                            parameters: { type: 'object', properties: { answer: { type: 'string' } }, required: ['answer'] },
+                        }],
+                    },
+                }));
+            } else if (!state.aaiReady) {
+                dbg('Voice not connected yet, connecting now');
+                connectToAssemblyAI().catch(err => {
+                    dbg('Voice failed: ' + err.message);
+                    updateStatus('Voice failed: ' + err.message);
+                });
+            } else {
+                dbg('No OCR data, voice already connected — agent will proceed with questions');
+            }
             break;
 
         case 'state':
@@ -425,16 +465,24 @@ RULES:
             type: 'session.update',
             session: {
                 system_prompt: systemPrompt,
-                greeting: ocrName
-                    ? `Hello! Welcome to ${state.businessName || 'our office'}. My name is Anna. I see from your ID that your name is ${ocrName}. Let me confirm your details.`
+                greeting: needsScan
+                    ? `Hello! Welcome to ${state.businessName || 'our office'}. My name is Anna and I'll be your virtual reception assistant today. Please upload your ID document using the button on screen.`
                     : `Hello! Welcome to ${state.businessName || 'our office'}. My name is Anna and I'll be your virtual reception assistant today. Let's get you checked in.`,
                 output: { type: 'audio', voice: 'anna' },
-                tools: [{
-                    type: 'function',
-                    name: 'submit_answer',
-                    description: 'Submit the visitor answer for the current question.',
-                    parameters: { type: 'object', properties: { answer: { type: 'string' } }, required: ['answer'] },
-                }],
+                tools: [
+                    {
+                        type: 'function',
+                        name: 'submit_answer',
+                        description: 'Submit the visitor answer for the current question.',
+                        parameters: { type: 'object', properties: { answer: { type: 'string' } }, required: ['answer'] },
+                    },
+                    ...(needsScan ? [{
+                        type: 'function',
+                        name: 'submit_ocr_data',
+                        description: 'Submit the OCR data extracted from the visitor ID document.',
+                        parameters: { type: 'object', properties: { name: { type: 'string' }, id_number: { type: 'string' }, date_of_birth: { type: 'string' }, address: { type: 'string' } }, required: ['name'] },
+                    }] : []),
+                ],
             },
         };
         dbg('Sending session.update (prompt length=' + systemPrompt.length + ')');
