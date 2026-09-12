@@ -6,12 +6,8 @@
     <meta name="theme-color" content="#2563eb">
     <meta name="apple-mobile-web-app-capable" content="yes">
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-    
     <title>Virtualobby — Virtual Reception</title>
-    
-    <!-- Telegram Mini App SDK -->
     <script src="https://telegram.org/js/telegram-web-app.js"></script>
-    
     <link rel="stylesheet" href="style.css">
 </head>
 <body>
@@ -27,11 +23,11 @@
         <div class="header-content">
             <div class="logo" id="logo">
                 <span class="logo-icon">🏥</span>
-                <h1>Virtualobby</h1>
+                <h1 id="header-title">Welcome</h1>
             </div>
             <div class="status" id="status">
                 <span class="status-dot"></span>
-                <span class="status-text">Ready</span>
+                <span class="status-text">Connecting...</span>
             </div>
         </div>
     </header>
@@ -41,12 +37,12 @@
         <section class="step hidden" id="step-scan">
             <div class="step-header">
                 <span class="step-number">1</span>
-                <h2>Scan Document</h2>
+                <h2>Identity Verification</h2>
             </div>
-            <p class="step-description">Take a photo of your ID document</p>
+            <p class="step-description">First, let's verify your identity. Please scan or upload a photo of your ID document.</p>
             
             <!-- Camera preview (live if supported) -->
-            <div class="camera-container" id="camera-container">
+            <div class="camera-container hidden" id="camera-container">
                 <video id="camera-preview" autoplay playsinline></video>
                 <canvas id="camera-canvas" class="hidden"></canvas>
                 <div class="camera-overlay">
@@ -55,7 +51,7 @@
             </div>
             
             <!-- Camera controls -->
-            <div class="camera-controls" id="camera-controls">
+            <div class="camera-controls hidden" id="camera-controls">
                 <button class="btn btn-secondary" id="btn-switch-camera">🔄 Switch</button>
                 <button class="btn btn-primary btn-capture" id="btn-capture">📸 Capture</button>
             </div>
@@ -63,18 +59,18 @@
             <!-- Divider -->
             <div class="scan-divider"><span>or</span></div>
             
-            <!-- File upload fallback -->
+            <!-- File upload -->
             <div class="scan-actions" id="scan-actions">
-                <label class="btn btn-secondary btn-scan-main" for="file-upload-camera">📷 Take Photo</label>
+                <label class="btn btn-primary btn-scan-main" for="file-upload-camera">📷 Take Photo</label>
                 <input type="file" id="file-upload-camera" accept="image/*" capture="environment" style="display: none;">
-                <label class="btn btn-secondary btn-scan-main" for="file-upload-gallery">🖼️ Gallery</label>
+                <label class="btn btn-secondary btn-scan-main" for="file-upload-gallery">🖼️ Choose from Gallery</label>
                 <input type="file" id="file-upload-gallery" accept="image/*" style="display: none;">
             </div>
             
             <!-- Loading -->
             <div class="loading hidden" id="ocr-loading">
                 <div class="spinner"></div>
-                <p>Scanning document...</p>
+                <p>Scanning your document...</p>
             </div>
             
             <!-- OCR Result -->

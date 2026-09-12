@@ -171,6 +171,9 @@ function handleDOMessage(msg) {
             state.businessName = msg.business_name || '';
             state.requiresIdScan = msg.requires_id_scan;
             state.questions = msg.questions || [];
+            // Update header with business name
+            const headerTitle = document.getElementById('header-title');
+            if (headerTitle) headerTitle.textContent = `Welcome to ${state.businessName}`;
             updateStatus(msg.text || 'Connected');
             break;
 
@@ -190,8 +193,11 @@ function handleDOMessage(msg) {
             state.ocrData = msg.ocr_data || state.ocrData;
             state.businessName = msg.business_name || state.businessName;
             stopCamera();
-            showStep('voice');
-            connectToAssemblyAI();
+            // Brief delay so user sees OCR result before switching to voice
+            setTimeout(() => {
+                showStep('voice');
+                connectToAssemblyAI();
+            }, 1500);
             break;
 
         case 'state':
@@ -367,8 +373,8 @@ RULES:
                 session: {
                     system_prompt: systemPrompt,
                     greeting: ocrName
-                        ? `Welcome to ${state.businessName || 'our office'}! I see your name is ${ocrName}. Let me confirm your details.`
-                        : `Welcome to ${state.businessName || 'our office'}! I'm your virtual assistant. Let's get you checked in.`,
+                        ? `Hello! Welcome to ${state.businessName || 'our office'}. My name is Anna and I'll be your virtual reception assistant today. I see from your ID that your name is ${ocrName}. Let me confirm your details.`
+                        : `Hello! Welcome to ${state.businessName || 'our office'}. My name is Anna and I'll be your virtual reception assistant today. Let's get you checked in.`,
                     output: { type: 'audio', voice: 'anna' },
                     tools: [{
                         type: 'function',
