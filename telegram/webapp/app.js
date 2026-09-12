@@ -58,6 +58,7 @@ const state = {
     captureCtx: null, playbackCtx: null, playback: null, mic: null,
     aaiReady: false, questions: [], answers: {}, ocrData: null,
     requiresIdScan: false, cameraFacing: 'environment', mediaStream: null,
+    voiceConnecting: false,
 };
 
 const $ = (id) => document.getElementById(id);
@@ -243,17 +244,36 @@ async function uploadAndProcess(blobOrFile, contentType) {
 // ── AssemblyAI Voice ───────────────────────────────────────────────────────
 
 async function connectToAssemblyAI() {
+    // Guard: prevent double-calling (OCR timeout + questions_ready race)
+    if (state.voiceConnecting || state.aaiWs) {
+        console.log('Already connecting/connected to voice, skipping');
+        return;
+    }
+    state.voiceConnecting = true;
+
     console.log('Connecting to AssemblyAI...');
 
     // 1. Get token
-    const tokenResp = await fetch(`${CONFIG.API_URL}/api/token`);
-    if (!tokenResp.ok) throw new Error('Token failed');
-    const { token } = await tokenResp.json();
-    console.log('Token received');
+    let token;
+    try {
+        const tokenResp = await fetch(`${CONFIG.API_URL}/api/token`);
+        if (!tokenResp.ok) throw new Error(`Token HTTP ${tokenResp.status}`);
+        const data = await tokenResp.json();
+        token = data.token;
+        if (!token) throw new Error('No token in response: ' + JSON.stringify(data));
+        console.log('Token received');
+    } catch (e) {
+        state.voiceConnecting = false;
+        throw new Error('Token fetch failed: ' + e.message);
+    }
 
     // 2. Set up audio
     state.captureCtx = new AudioContext({ sampleRate: WIRE_RATE });
     state.playbackCtx = new AudioContext({ sampleRate: WIRE_RATE });
+    // Resume both contexts — mobile browsers (esp. Telegram WebView) start them suspended
+    await state.captureCtx.resume();
+    await state.playbackCtx.resume();
+    console.log('AudioContexts resumed, state:', state.captureCtx.state, state.playbackCtx.state);
 
     const stream = await navigator.mediaDevices.getUserMedia({
         audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true },
@@ -263,7 +283,9 @@ async function connectToAssemblyAI() {
 
     const source = state.captureCtx.createMediaStreamSource(stream);
     const capture = await addWorklet(state.captureCtx, CAPTURE_WORKLET, 'capture');
-    source.connect(capture); capture.connect(state.captureCtx.destination);
+    source.connect(capture);
+    // NOTE: do NOT connect capture to destination — it only posts PCM via port.onmessage,
+    // connecting to speakers causes feedback and can block the playback AudioContext on mobile.
 
     state.playback = await addWorklet(state.playbackCtx, PLAYBACK_WORKLET, 'playback');
     state.playback.connect(state.playbackCtx.destination);
@@ -332,14 +354,26 @@ RULES:
     };
 
     state.aaiWs.onmessage = ({ data }) => handleAAILogic(JSON.parse(data));
-    state.aaiWs.onerror = (err) => console.error('AAI error:', err);
-    state.aaiWs.onclose = () => { console.log('AAI closed'); state.aaiReady = false; };
+    state.aaiWs.onerror = (err) => {
+        console.error('AAI WebSocket error:', err);
+        updateStatus('Voice connection error');
+        state.voiceConnecting = false;
+    };
+    state.aaiWs.onclose = (ev) => {
+        console.log('AAI WebSocket closed, code:', ev.code, 'reason:', ev.reason);
+        state.aaiReady = false;
+        state.voiceConnecting = false;
+        state.aaiWs = null;
+        if (ev.code !== 1000) updateStatus('Voice disconnected — ' + (ev.reason || 'closed'));
+    };
 }
 
 function handleAAILogic(msg) {
+    console.log('AAI ←', msg.type, msg);
     switch (msg.type) {
         case 'session.ready':
             state.aaiReady = true;
+            state.voiceConnecting = false;
             updateStatus('Listening...');
             break;
 
@@ -368,6 +402,9 @@ function handleAAILogic(msg) {
                 if (state.doWs?.readyState === 1) state.doWs.send(JSON.stringify({ type: 'user_transcript', text: answer }));
                 if (state.aaiWs?.readyState === 1) state.aaiWs.send(JSON.stringify({ type: 'tool.result', call_id: msg.call_id, result: JSON.stringify({ success: true }) }));
             }
+            break;
+        default:
+            console.log('Unhandled AAI message type:', msg.type, msg);
             break;
     }
 }
@@ -410,7 +447,13 @@ function showDone(registrationId) {
 
 function cleanupAudio() {
     state.aaiReady = false;
-    if (state.aaiWs?.readyState === 1) { state.aaiWs.send(JSON.stringify({ type: 'session.end' })); setTimeout(() => state.aaiWs?.close(), 2000); }
+    state.voiceConnecting = false;
+    if (state.aaiWs?.readyState === 1) {
+        try { state.aaiWs.send(JSON.stringify({ type: 'session.end' })); } catch (_) {}
+        setTimeout(() => { try { state.aaiWs?.close(); } catch (_) {} state.aaiWs = null; }, 2000);
+    } else {
+        state.aaiWs = null;
+    }
     state.playback?.port.postMessage('stop');
     state.mic?.getTracks().forEach(t => t.stop());
     state.captureCtx?.close(); state.playbackCtx?.close();

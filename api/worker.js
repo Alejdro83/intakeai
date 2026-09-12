@@ -82,7 +82,16 @@ export default {
           'https://agents.assemblyai.com/v1/token?product=voice_agent&expires_in_seconds=60',
           { headers: { Authorization: `Bearer ${env.ASSEMBLYAI_API_KEY}` } }
         );
+        if (!resp.ok) {
+          const errText = await resp.text().catch(() => '');
+          console.error('AssemblyAI token error:', resp.status, errText);
+          return jsonResponse({ error: `AssemblyAI token error: ${resp.status}` }, 502);
+        }
         const data = await resp.json();
+        if (!data.token) {
+          console.error('AssemblyAI returned no token:', JSON.stringify(data));
+          return jsonResponse({ error: 'No token returned from AssemblyAI' }, 502);
+        }
         return jsonResponse({ token: data.token });
       } catch (e) {
         return jsonResponse({ error: e.message }, 500);
