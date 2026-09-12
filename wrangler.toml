@@ -1,6 +1,10 @@
 name = "virtualobby-api"
 main = "api/worker.js"
-compatibility_date = "2024-01-01"
+compatibility_date = "2024-09-23"
+compatibility_flags = ["nodejs_compat"]
+
+[placement]
+mode = "smart"
 
 # D1 Database
 [[d1_databases]]

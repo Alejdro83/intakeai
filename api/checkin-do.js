@@ -10,7 +10,7 @@ export class CheckinSession {
   constructor(state, env) {
     this.state = state;
     this.env = env;
-    this.session = this._freshSession();
+    this.session = null; // loaded async in webSocketOpen
   }
 
   _freshSession() {
@@ -25,6 +25,17 @@ export class CheckinSession {
       idImageR2Key: null,
       startedAt: null,
     };
+  }
+
+  async _loadSession() {
+    if (this.session) return;
+    this.session = (await this.state.storage.get("session")) || this._freshSession();
+  }
+
+  async _saveSession() {
+    try { await this.state.storage.put("session", this.session); } catch (e) {
+      console.error("Failed to save session:", e);
+    }
   }
 
   _send(ws, obj) {
@@ -46,25 +57,38 @@ export class CheckinSession {
   }
 
   async webSocketOpen(ws) {
+    await this._loadSession();
     this.session.startedAt = Date.now();
+    await this._saveSession();
     try { await this.state.storage.setAlarm(Date.now() + 10 * 60 * 1000); } catch (_) {}
   }
 
   async webSocketMessage(ws, message) {
-    let data;
-    try { data = JSON.parse(message); } catch { return this._error(ws, "Invalid JSON"); }
+    try {
+      await this._loadSession();
+      let data;
+      try { data = JSON.parse(message); } catch { return this._error(ws, "Invalid JSON"); }
 
-    switch (data.type) {
-      case "start": return this._handleStart(ws, data);
-      case "user_transcript": return this._handleTranscript(ws, data);
-      case "id_uploaded": return this._handleIdUploaded(ws, data);
-      case "confirm": return this._handleConfirm(ws);
-      default: return this._error(ws, `Unknown message type: ${data.type}`);
+      switch (data.type) {
+        case "start": return await this._handleStart(ws, data);
+        case "user_transcript": return await this._handleTranscript(ws, data);
+        case "id_uploaded": return await this._handleIdUploaded(ws, data);
+        case "confirm": return await this._handleConfirm(ws);
+        default: return this._error(ws, `Unknown message type: ${data.type}`);
+      }
+    } catch (err) {
+      console.error("webSocketMessage FATAL:", err);
+      this._error(ws, "Internal error: " + err.message);
     }
   }
 
-  async webSocketClose() {}
-  async webSocketError(ws, error) { console.error("WebSocket error:", error); }
+  async webSocketClose(ws, code, reason) {
+    console.log("WebSocket closed:", code, reason || "");
+  }
+
+  async webSocketError(ws, error) {
+    console.error("WebSocket error:", error);
+  }
 
   async alarm() {
     for (const ws of this.state.getWebSockets()) {
@@ -72,6 +96,7 @@ export class CheckinSession {
       try { ws.close(); } catch (_) {}
     }
     this.session = this._freshSession();
+    await this._saveSession();
   }
 
   /* ------------------------------------------------------------------ */
@@ -79,7 +104,6 @@ export class CheckinSession {
   /* ------------------------------------------------------------------ */
 
   async _handleStart(ws, data) {
-    console.log("_handleStart: business_id=" + data.business_id + " current fsmState=" + this.session.fsmState);
     const businessId = data.business_id;
     if (!businessId) return this._error(ws, "Missing business_id");
 
@@ -98,15 +122,14 @@ export class CheckinSession {
       return this._error(ws, `DB error: ${err.message}`);
     }
 
-    const bizName = this.session.businessConfig.name || "our office";
-    const requiresScan = this.session.businessConfig.requires_id_scan;
+    const bizName = this.session.businessConfig?.name || "our office";
+    const requiresScan = this.session.businessConfig?.requires_id_scan;
 
-    // Send welcome with ALL questions upfront
     this._send(ws, {
       type: "welcome",
       text: `Welcome to ${bizName}!`,
       business_name: bizName,
-      voice_persona: this.session.businessConfig.voice_persona || "anna",
+      voice_persona: this.session.businessConfig?.voice_persona || "anna",
       questions: this.session.questions.map(q => ({
         id: q.id, text: q.question_text, type: q.validation_type, field: q.field_key,
       })),
@@ -115,48 +138,35 @@ export class CheckinSession {
 
     if (requiresScan) {
       this.session.fsmState = "scanning_doc";
-      this._send(ws, {
-        type: "request_camera",
-        text: "Please scan your ID document",
-      });
+      this._send(ws, { type: "request_camera", text: "Please scan your ID document" });
     } else {
       this.session.fsmState = "asking_questions";
       this._sendQuestionsReady(ws);
     }
+
+    await this._saveSession();
   }
 
   /* ------------------------------------------------------------------ */
-  /*  FSM: scanning_doc → OCR                                           */
+  /*  FSM: scanning_doc → upload received                               */
   /* ------------------------------------------------------------------ */
 
   async _handleIdUploaded(ws, data) {
-    try {
-      console.log("_handleIdUploaded: fsmState=" + this.session.fsmState + " r2_key=" + data.r2_key);
-      if (this.session.fsmState !== "scanning_doc") {
-        console.error("REJECTED: fsmState=" + this.session.fsmState);
-        return this._error(ws, "Not expecting document upload (state=" + this.session.fsmState + ")");
-      }
-
-      const r2Key = data.r2_key;
-      if (!r2Key) return this._error(ws, "Missing r2_key");
-
-      this.session.idImageR2Key = r2Key;
-
-      // Skip OCR for now — go straight to questions
-      console.log("Skipping OCR, sending ocr_result + questions_ready");
-
-      this._send(ws, {
-        type: "ocr_result",
-        fields: {},
-        success: false,
-      });
-
-      this.session.fsmState = "asking_questions";
-      this._sendQuestionsReady(ws);
-    } catch (err) {
-      console.error("_handleIdUploaded FATAL:", err);
-      this._error(ws, "Processing error: " + err.message);
+    console.log("_handleIdUploaded: fsmState=" + this.session.fsmState);
+    if (this.session.fsmState !== "scanning_doc") {
+      return this._error(ws, "Not expecting document upload (state=" + this.session.fsmState + ")");
     }
+
+    const r2Key = data.r2_key;
+    if (!r2Key) return this._error(ws, "Missing r2_key");
+
+    this.session.idImageR2Key = r2Key;
+
+    // Send ocr_result (empty for now) and questions_ready immediately
+    this._send(ws, { type: "ocr_result", fields: {}, success: false });
+    this.session.fsmState = "asking_questions";
+    this._sendQuestionsReady(ws);
+    await this._saveSession();
   }
 
   /* ------------------------------------------------------------------ */
@@ -198,6 +208,7 @@ export class CheckinSession {
       this.session.answers[q.id || `q${this.session.currentQuestionIndex}`] = text;
       this.session.currentQuestionIndex++;
       this._sendCurrentQuestion(ws);
+      await this._saveSession();
     }
   }
 
@@ -237,6 +248,7 @@ export class CheckinSession {
 
     this.session.fsmState = "done";
     this._send(ws, { type: "checkin_complete", registration_id: registrationId });
+    await this._saveSession();
 
     setTimeout(() => { try { ws.close(); } catch (_) {} }, 2000);
   }
