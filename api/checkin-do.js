@@ -6,7 +6,7 @@
  * and the DO walks the visitor through an FSM-driven questionnaire,
  * optional ID scan (R2 + Vision OCR), and final confirmation.
  *
- * FSM: idle → greeting → asking_questions → scanning_doc → confirming → done
+ * FSM: idle → greeting → scanning_doc → asking_questions → confirming → done
  *
  * Env bindings expected:
  *   env.DB       — D1Database
@@ -127,7 +127,7 @@ export class CheckinSession {
   }
 
   /* ------------------------------------------------------------------ */
-  /*  FSM: start                                                         */
+  /*  FSM: start → greeting                                              */
   /* ------------------------------------------------------------------ */
 
   async _handleStart(ws, data) {
@@ -155,13 +155,14 @@ export class CheckinSession {
       return this._error(ws, `DB error: ${err.message}`);
     }
 
-    // Move to greeting
-    this.session.fsmState = "greeting";
-    const greetingText = `Welcome to ${this.session.businessConfig.name || "our office"}!`;
+    const bizName = this.session.businessConfig.name || "our office";
+    const requiresScan = this.session.businessConfig.requires_id_scan;
 
+    // Send welcome — frontend decides whether to show camera or voice first
     this._send(ws, {
       type: "welcome",
-      text: greetingText,
+      text: `Welcome to ${bizName}!`,
+      business_name: bizName,
       voice_persona: this.session.businessConfig.voice_persona || "anna",
       questions: this.session.questions.map(q => ({
         id: q.id,
@@ -169,56 +170,21 @@ export class CheckinSession {
         type: q.validation_type,
         field: q.field_key,
       })),
-      requires_id_scan: this.session.businessConfig.requires_id_scan,
+      requires_id_scan: requiresScan,
     });
 
-    // Immediately transition to first question (or scanning if none)
-    this.session.fsmState = "asking_questions";
-    this._sendCurrentQuestion(ws);
-  }
-
-  /* ------------------------------------------------------------------ */
-  /*  FSM: asking_questions                                              */
-  /* ------------------------------------------------------------------ */
-
-  _sendCurrentQuestion(ws) {
-    const { questions, currentQuestionIndex } = this.session;
-
-    if (currentQuestionIndex >= questions.length) {
-      // All questions answered — move to doc scanning if business requires it
-      if (this.session.businessConfig.requires_id_scan) {
-        this.session.fsmState = "scanning_doc";
-        return this._send(ws, {
-          type: "request_camera",
-          text: "Please show your document to the camera",
-        });
-      }
-      // Skip to confirmation
-      return this._goToConfirming(ws);
+    // If ID scan required → go to scanning_doc FIRST (camera before voice)
+    if (requiresScan) {
+      this.session.fsmState = "scanning_doc";
+      this._send(ws, {
+        type: "request_camera",
+        text: "Please show your ID document to the camera",
+      });
+    } else {
+      // No scan needed → go directly to questions
+      this.session.fsmState = "asking_questions";
+      this._sendQuestionsReady(ws);
     }
-
-    const q = questions[currentQuestionIndex];
-    this._send(ws, {
-      type: "state",
-      state: "asking_questions",
-      question: q.question_text,
-      index: currentQuestionIndex,
-      total: questions.length,
-    });
-  }
-
-  async _handleTranscript(ws, data) {
-    const text = (data.text || "").trim();
-    if (!text) return;
-
-    if (this.session.fsmState === "asking_questions") {
-      // Store answer
-      const q = this.session.questions[this.session.currentQuestionIndex];
-      this.session.answers[q.id || `q${this.session.currentQuestionIndex}`] = text;
-      this.session.currentQuestionIndex++;
-      this._sendCurrentQuestion(ws);
-    }
-    // In other states, transcript is ignored (browser handles voice locally)
   }
 
   /* ------------------------------------------------------------------ */
@@ -270,13 +236,65 @@ export class CheckinSession {
       }
     }
 
-    // Send OCR result (or empty if AI not available)
+    // Send OCR result to frontend
     this._send(ws, {
       type: "ocr_result",
       fields: this.session.ocrData || {},
     });
 
-    this._goToConfirming(ws);
+    // Now transition to questions — frontend will connect voice with OCR data
+    this.session.fsmState = "asking_questions";
+    this._sendQuestionsReady(ws);
+  }
+
+  /* ------------------------------------------------------------------ */
+  /*  FSM: asking_questions                                              */
+  /* ------------------------------------------------------------------ */
+
+  _sendQuestionsReady(ws) {
+    this._send(ws, {
+      type: "questions_ready",
+      questions: this.session.questions.map(q => ({
+        id: q.id,
+        text: q.question_text,
+        type: q.validation_type,
+        field: q.field_key,
+      })),
+      ocr_data: this.session.ocrData || {},
+      business_name: this.session.businessConfig?.name || "our office",
+    });
+  }
+
+  _sendCurrentQuestion(ws) {
+    const { questions, currentQuestionIndex } = this.session;
+
+    if (currentQuestionIndex >= questions.length) {
+      // All questions answered — go to confirmation
+      return this._goToConfirming(ws);
+    }
+
+    const q = questions[currentQuestionIndex];
+    this._send(ws, {
+      type: "state",
+      state: "asking_questions",
+      question: q.question_text,
+      index: currentQuestionIndex,
+      total: questions.length,
+    });
+  }
+
+  async _handleTranscript(ws, data) {
+    const text = (data.text || "").trim();
+    if (!text) return;
+
+    if (this.session.fsmState === "asking_questions") {
+      // Store answer
+      const q = this.session.questions[this.session.currentQuestionIndex];
+      this.session.answers[q.id || `q${this.session.currentQuestionIndex}`] = text;
+      this.session.currentQuestionIndex++;
+      this._sendCurrentQuestion(ws);
+    }
+    // In other states, transcript is ignored (browser handles voice locally)
   }
 
   /* ------------------------------------------------------------------ */

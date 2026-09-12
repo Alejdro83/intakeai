@@ -5,8 +5,8 @@
  *   WS1: Durable Object (state management, questions, OCR results)
  *   WS2: AssemblyAI Voice Agent (voice/audio capture + playback)
  *
- * Flow: parse start_param → connect DO → fetch token → connect AAI →
- *       voice Q&A → camera/OCR → summary → done
+ * Flow: parse start_param → connect DO → camera/OCR → fetch token → connect AAI →
+ *       voice confirmation of OCR data → voice Q&A → summary → done
  */
 
 // ── Configuration ──────────────────────────────────────────────────────────
@@ -151,6 +151,7 @@ const PLAYBACK_WORKLET = `
 
 const state = {
     businessId: null,
+    businessName: '',
     doWs: null,                // Durable Object WebSocket
     aaiWs: null,               // AssemblyAI Voice Agent WebSocket
     captureCtx: null,          // AudioContext for mic capture
@@ -160,8 +161,10 @@ const state = {
     aaiReady: false,           // AssemblyAI session.ready received
     currentFsmState: 'idle',
     currentQuestion: null,
+    questions: [],
     answers: {},
     ocrData: null,
+    requiresIdScan: false,
     cameraFacing: 'environment',
     mediaStream: null,         // camera stream (separate from mic)
 };
@@ -184,14 +187,41 @@ const elements = {
     btnRescan: $('btn-rescan'),
     btnConfirmScan: $('btn-confirm-scan'),
     transcriptMessages: $('transcript-messages'),
-    voiceStatus: $('voice-status'),
+    statusDot: $('status-dot'),
+    statusText: $('status-text'),
+    btnNewVisitor: $('btn-new-visitor'),
     confirmMessage: $('confirm-message'),
     confirmId: $('confirm-id'),
-    btnNewVisitor: $('btn-new-visitor'),
-    status: $('status'),
 };
 
-// ── Telegram Mini App ──────────────────────────────────────────────────────
+// ── Helpers ────────────────────────────────────────────────────────────────
+
+function updateStatus(text) {
+    if (elements.statusText) elements.statusText.textContent = text;
+    if (elements.statusDot) {
+        elements.statusDot.className = 'status-dot ' +
+            (text.includes('Listening') ? 'listening' :
+             text.includes('Speaking') ? 'speaking' : '');
+    }
+}
+
+function showStep(step) {
+    const steps = { scan: elements.stepScan, voice: elements.stepVoice, confirm: elements.stepConfirm };
+    for (const [key, el] of Object.entries(steps)) {
+        if (el) el.classList.toggle('hidden', key !== step);
+    }
+}
+
+function addMessage(who, text) {
+    if (!elements.transcriptMessages) return;
+    const div = document.createElement('div');
+    div.className = `message ${who}`;
+    div.textContent = text;
+    elements.transcriptMessages.appendChild(div);
+    elements.transcriptMessages.scrollTop = elements.transcriptMessages.scrollHeight;
+}
+
+// ── Telegram Mini App Init ─────────────────────────────────────────────────
 
 function initTelegram() {
     const tg = CONFIG.tgApp;
@@ -201,93 +231,40 @@ function initTelegram() {
     tg.expand();
 
     // Parse start_param for business_id
-    const startParam = tg.initDataUnsafe?.start_param || '';
-    state.businessId = startParam.startsWith('business_')
-        ? startParam.replace('business_', '')
-        : 'clinic-main';
-
-    // Apply theme
-    if (tg.themeParams?.button_color) {
-        document.body.style.setProperty('--primary', tg.themeParams.button_color);
+    const initData = tg.initDataUnsafe || {};
+    const startParam = initData.start_param || '';
+    if (startParam) {
+        state.businessId = startParam;
     }
-
-    tg.enableClosingConfirmation();
-    document.body.classList.add('telegram-webapp');
-    console.log('Telegram init, business_id:', state.businessId);
 }
 
-// ── Status helpers ─────────────────────────────────────────────────────────
-
-function updateStatus(text) {
-    const el = elements.status;
-    if (!el) return;
-    const span = el.querySelector('.status-text') || el;
-    span.textContent = text;
-}
-
-function showStep(step) {
-    const map = {
-        scan: elements.stepScan,
-        voice: elements.stepVoice,
-        confirm: elements.stepConfirm,
-    };
-    Object.values(map).forEach(el => el?.classList.add('hidden'));
-    map[step]?.classList.remove('hidden');
-}
-
-function addMessage(role, text) {
-    const container = elements.transcriptMessages;
-    if (!container) return;
-    const msg = document.createElement('div');
-    msg.className = `message ${role}`;
-    msg.textContent = text;
-    container.appendChild(msg);
-    container.scrollTop = container.scrollHeight;
-}
-
-// ── WS1: Durable Object ───────────────────────────────────────────────────
+// ── DO WebSocket ───────────────────────────────────────────────────────────
 
 async function connectToDO() {
-    try {
-        // 1. Get session UUID from Worker
-        const resp = await fetch(`${CONFIG.API_URL}/api/ws`);
-        if (!resp.ok) throw new Error(`Session init failed: ${resp.status}`);
-        const { session_id } = await resp.json();
+    const wsUrl = `${CONFIG.API_URL.replace('https://', 'wss://').replace('http://', 'ws://')}/api/ws/${crypto.randomUUID()}`;
 
-        // 2. Connect WebSocket to Durable Object
-        const wsUrl = CONFIG.API_URL.replace('https://', 'wss://') + `/api/ws/${session_id}`;
-        state.doWs = new WebSocket(wsUrl);
+    state.doWs = new WebSocket(wsUrl);
 
-        state.doWs.onopen = () => {
-            console.log('DO connected, sending start');
-            state.doWs.send(JSON.stringify({
-                type: 'start',
-                business_id: state.businessId,
-            }));
-        };
+    state.doWs.onopen = () => {
+        console.log('DO connected, sending start');
+        state.doWs.send(JSON.stringify({
+            type: 'start',
+            business_id: state.businessId || 'clinic-main',
+        }));
+    };
 
-        state.doWs.onmessage = (event) => {
-            const msg = JSON.parse(event.data);
-            handleDOMessage(msg);
-        };
+    state.doWs.onmessage = (event) => {
+        const msg = JSON.parse(event.data);
+        handleDOMessage(msg);
+    };
 
-        state.doWs.onerror = (err) => {
-            console.error('DO WebSocket error:', err);
-            updateStatus('Connection error');
-        };
+    state.doWs.onerror = (err) => {
+        console.error('DO WebSocket error:', err);
+    };
 
-        state.doWs.onclose = () => {
-            console.log('DO disconnected');
-            // Close AAI session to stop billing
-            if (state.aaiWs?.readyState === 1) {
-                state.aaiWs.send(JSON.stringify({ type: 'session.end' }));
-            }
-            cleanupAudio();
-        };
-    } catch (err) {
-        console.error('DO connection error:', err);
-        updateStatus('Failed to connect');
-    }
+    state.doWs.onclose = () => {
+        console.log('DO disconnected');
+    };
 }
 
 // ── DO Message Handler ─────────────────────────────────────────────────────
@@ -297,12 +274,35 @@ function handleDOMessage(msg) {
 
     switch (msg.type) {
         case 'welcome':
-            state.welcomeText = msg.text;
-            state.questions = msg.questions || [];
+            state.businessName = msg.business_name || '';
             state.requiresIdScan = msg.requires_id_scan;
+            state.questions = msg.questions || [];
             updateStatus(msg.text || 'Connected');
+            // If ID scan required, camera will open via request_camera
+            // Otherwise, questions_ready will trigger voice connection
+            break;
+
+        case 'request_camera':
+            // ID scan required — show camera BEFORE voice
+            updateStatus('Please scan your ID');
+            showStep('scan');
+            startCamera();
+            break;
+
+        case 'ocr_result':
+            // OCR done — show results in scan step
+            state.ocrData = msg.fields;
+            displayOCRResult(msg.fields);
+            break;
+
+        case 'questions_ready':
+            // All data loaded — now connect voice with OCR data
+            state.questions = msg.questions || state.questions;
+            state.ocrData = msg.ocr_data || state.ocrData;
+            state.businessName = msg.business_name || state.businessName;
+            // Stop camera if still running, switch to voice
+            stopCamera();
             showStep('voice');
-            // Connect to AssemblyAI with questions baked into the prompt
             connectToAssemblyAI();
             break;
 
@@ -310,17 +310,6 @@ function handleDOMessage(msg) {
             state.currentFsmState = msg.state;
             state.currentQuestion = msg.question;
             updateStatus(`Question ${msg.index + 1}/${msg.total}: ${msg.question}`);
-            break;
-
-        case 'request_camera':
-            updateStatus('Please scan your ID');
-            showStep('scan');
-            startCamera();
-            break;
-
-        case 'ocr_result':
-            state.ocrData = msg.fields;
-            displayOCRResult(msg.fields);
             break;
 
         case 'summary':
@@ -340,43 +329,35 @@ function handleDOMessage(msg) {
     }
 }
 
-// ── WS2: AssemblyAI Voice Agent ────────────────────────────────────────────
+// ── AssemblyAI Voice Agent ─────────────────────────────────────────────────
 
 async function connectToAssemblyAI() {
     try {
-        // 1. Fetch ephemeral token from Worker (never expose API key)
-        const resp = await fetch(`${CONFIG.API_URL}/api/token`);
-        if (!resp.ok) throw new Error(`Token fetch failed: ${resp.status}`);
-        const { token } = await resp.json();
+        // 1. Get session token from Worker
+        const tokenResp = await fetch(`${CONFIG.API_URL}/api/token`);
+        if (!tokenResp.ok) throw new Error('Failed to get token');
+        const { token } = await tokenResp.json();
 
-        // 2. Two AudioContexts — Safari requires creation in user gesture,
-        //    but we're inside the init flow triggered by Telegram's ready()
+        // 2. Set up audio context for mic capture
         state.captureCtx = new AudioContext({ sampleRate: WIRE_RATE });
         state.playbackCtx = new AudioContext({ sampleRate: WIRE_RATE });
-        await Promise.all([state.captureCtx.resume(), state.playbackCtx.resume()]);
 
-        // 3. Playback worklet
+        const stream = await navigator.mediaDevices.getUserMedia({
+            audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+        });
+        state.mic = stream;
+
+        const source = state.captureCtx.createMediaStreamSource(stream);
+        const capture = await addWorklet(state.captureCtx, CAPTURE_WORKLET, 'capture');
+        source.connect(capture);
+        // Connect to destination to keep the graph alive (worklet won't process otherwise)
+        capture.connect(state.captureCtx.destination);
+
         state.playback = await addWorklet(state.playbackCtx, PLAYBACK_WORKLET, 'playback');
         state.playback.connect(state.playbackCtx.destination);
 
-        // 4. Microphone
-        state.mic = await navigator.mediaDevices.getUserMedia({
-            audio: {
-                channelCount: 1,
-                echoCancellation: true,
-                noiseSuppression: true,
-                autoGainControl: false,
-            },
-        });
-
-        // 5. Capture worklet
-        const capture = await addWorklet(state.captureCtx, CAPTURE_WORKLET, 'capture');
-        state.captureCtx.createMediaStreamSource(state.mic).connect(capture);
-
-        // 6. Connect WebSocket to AssemblyAI
-        const url = new URL(CONFIG.VOICE_AGENT_URL);
-        url.searchParams.set('token', token);
-        state.aaiWs = new WebSocket(url);
+        // 3. Open AssemblyAI WebSocket
+        state.aaiWs = new WebSocket(`${CONFIG.VOICE_AGENT_URL}?token=${token}`);
 
         // Send captured audio to AssemblyAI
         capture.port.onmessage = ({ data }) => {
@@ -391,28 +372,37 @@ async function connectToAssemblyAI() {
 
         state.aaiWs.onopen = () => {
             console.log('AAI connected, sending session.update');
-            // Build dynamic system prompt with questions from DO
+
+            // Build system prompt — personalized with OCR data if available
+            const ocrName = state.ocrData?.name || '';
+            const ocrFields = state.ocrData
+                ? Object.entries(state.ocrData)
+                    .filter(([k, v]) => v && k !== 'name')
+                    .map(([k, v]) => `${k}: ${v}`)
+                    .join(', ')
+                : '';
+
+            const ocrSection = ocrName
+                ? `\nOCR DATA (from ID scan):\n- Visitor name: ${ocrName}${ocrFields ? '\n- Other fields: ' + ocrFields : ''}\n\nStart by greeting the visitor by name and reading back the OCR data. Ask "Is this correct?" and wait for confirmation. Then proceed with the questions.`
+                : '';
+
             const questionsList = (state.questions || [])
                 .map((q, i) => `${i + 1}. "${q.text}" (field: ${q.field})`)
                 .join('\n');
-            const idScanNote = state.requiresIdScan
-                ? '\nAfter all questions, ask the visitor to show their ID document to the camera.'
-                : '';
 
-            const systemPrompt = `You are a friendly virtual reception assistant for check-in.
+            const systemPrompt = `You are a friendly virtual reception assistant at ${state.businessName || 'this office'}.
 
 FLOW:
-1. Greet the visitor warmly
-2. Ask each question below ONE AT A TIME, wait for answer, confirm briefly ("Got it", "Understood")
-3. After the visitor answers and you have confirmed their response, call the submit_answer tool with their answer
-4. Then move to the next question
-5. After all questions${idScanNote ? ', ask for ID scan if needed' : ''}
-6. Summarize all collected information
-7. Ask for final confirmation
+1. Greet the visitor warmly: "Welcome to ${state.businessName || 'our office'}! I'm your virtual assistant and I'll help you with check-in."
+${ocrSection ? '2. Read back the OCR data from their ID and ask "Is this correct?"\n3. Wait for confirmation, then say "Great" or "Let me update that" if they correct something' : '2. Ask each question below ONE AT A TIME'}
+4. Ask each question below ONE AT A TIME, wait for answer, confirm briefly ("Got it", "Understood")
+5. After the visitor answers and you have confirmed their response, call the submit_answer tool with their answer
+6. Then move to the next question
+7. After all questions, summarize what you collected
+8. Ask for final confirmation
 
 QUESTIONS TO ASK (in this exact order):
 ${questionsList}
-${idScanNote}
 
 RULES:
 - Speak in the visitor's language (detect from their first message)
@@ -426,7 +416,9 @@ RULES:
                 type: 'session.update',
                 session: {
                     system_prompt: systemPrompt,
-                    greeting: state.welcomeText || 'Welcome! Let me help you check in.',
+                    greeting: ocrName
+                        ? `Welcome to ${state.businessName || 'our office'}! I see your name is ${ocrName}. Let me confirm your details.`
+                        : `Welcome to ${state.businessName || 'our office'}! I'm your virtual assistant. Let's get you checked in.`,
                     output: { type: 'audio', voice: 'anna' },
                     tools: [{
                         type: 'function',
@@ -498,8 +490,6 @@ function handleAAILogic(msg) {
             break;
 
         case 'transcript.user':
-            // Display the transcript but do NOT send to DO.
-            // The agent calls submit_answer tool when the answer is confirmed.
             addMessage('user', msg.text);
             state.lastUserTranscript = msg.text;
             break;
@@ -541,7 +531,6 @@ function handleAAILogic(msg) {
             break;
 
         default:
-            // transcript.user.delta, transcript.agent.delta, etc.
             break;
     }
 }
@@ -572,6 +561,11 @@ async function startCamera() {
     } catch (err) {
         console.error('Camera error:', err);
         updateStatus('Camera access denied');
+        // If camera fails, skip to voice
+        showStep('voice');
+        if (state.doWs?.readyState === 1) {
+            state.doWs.send(JSON.stringify({ type: 'id_uploaded', r2_key: 'skipped' }));
+        }
     }
 }
 
@@ -582,7 +576,7 @@ function stopCamera() {
     }
 }
 
-// ── Capture + Upload (replaces Tesseract.js OCR) ───────────────────────────
+// ── Capture + Upload ──────────────────────────────────────────────────────
 
 async function captureAndUpload() {
     const video = elements.cameraPreview;
@@ -639,6 +633,7 @@ function displayOCRResult(fields) {
     container.innerHTML = '';
 
     const labels = {
+        name: 'Name',
         full_name: 'Name',
         id_number: 'ID Number',
         date_of_birth: 'Date of Birth',
@@ -656,14 +651,13 @@ function displayOCRResult(fields) {
     }
 
     elements.ocrResult?.classList.remove('hidden');
-    updateStatus('Document scanned — please confirm');
+    updateStatus('Document scanned — processing...');
 }
 
 // ── Summary & Done ─────────────────────────────────────────────────────────
 
 function showSummary(answers, ocr) {
     updateStatus('Review your check-in');
-    // Display summary in transcript area
     let summary = '📋 Check-in Summary:\n';
     if (answers) {
         for (const [q, a] of Object.entries(answers)) {
@@ -671,7 +665,7 @@ function showSummary(answers, ocr) {
         }
     }
     if (ocr) {
-        summary += '\n🪪 Document:\n';
+        summary += '\n📄 Document:\n';
         for (const [k, v] of Object.entries(ocr)) {
             if (v) summary += `• ${k}: ${v}\n`;
         }
@@ -688,7 +682,6 @@ function showDone(registrationId) {
     if (elements.confirmId) {
         elements.confirmId.textContent = `Registration ID: ${registrationId}`;
     }
-    // Disconnect voice
     cleanupAudio();
 }
 
@@ -725,16 +718,7 @@ function initEventListeners() {
         startCamera();
     });
 
-    // Confirm scan
-    elements.btnConfirmScan?.addEventListener('click', () => {
-        // Tell DO the scan is confirmed
-        if (state.doWs?.readyState === 1) {
-            state.doWs.send(JSON.stringify({ type: 'id_confirmed' }));
-        }
-        showStep('voice');
-    });
-
-    // File upload fallback (for Telegram WebView)
+    // File upload fallback (for Telegram WebView where camera may not work)
     const fileUpload = $('file-upload');
     if (fileUpload) {
         fileUpload.addEventListener('change', async (e) => {
@@ -774,7 +758,6 @@ function initEventListeners() {
         state.answers = {};
         state.ocrData = null;
         elements.transcriptMessages && (elements.transcriptMessages.innerHTML = '');
-        // Disconnect and restart
         cleanupAudio();
         if (state.doWs) { state.doWs.close(); state.doWs = null; }
         connectToDO();
@@ -803,11 +786,10 @@ async function init() {
     // 3. Init event listeners
     initEventListeners();
 
-    // 4. Show voice step and connect both WebSockets
-    showStep('voice');
+    // 4. Show connecting status
     updateStatus('Connecting...');
 
-    // 5. Connect to DO first; DO welcome triggers AAI connection
+    // 5. Connect to DO — DO welcome triggers the rest of the flow
     await connectToDO();
 
     console.log('Virtualobby initialized, business_id:', state.businessId);
