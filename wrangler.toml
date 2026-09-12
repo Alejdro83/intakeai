@@ -8,6 +8,10 @@ binding = "DB"
 database_name = "virtualobby-db"
 database_id = "d3c8c0da-6133-479e-9214-ce05498061c3"
 
+# Workers AI for vision OCR
+[ai]
+binding = "AI"
+
 # R2 Bucket for document photos
 [[r2_buckets]]
 binding = "R2_DOCS"
