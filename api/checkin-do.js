@@ -79,6 +79,7 @@ export class CheckinSession {
   /* ------------------------------------------------------------------ */
 
   async _handleStart(ws, data) {
+    console.log("_handleStart: business_id=" + data.business_id + " current fsmState=" + this.session.fsmState);
     const businessId = data.business_id;
     if (!businessId) return this._error(ws, "Missing business_id");
 
@@ -130,8 +131,10 @@ export class CheckinSession {
 
   async _handleIdUploaded(ws, data) {
     try {
+      console.log("_handleIdUploaded: fsmState=" + this.session.fsmState + " r2_key=" + data.r2_key + " businessId=" + this.session.businessId + " questions=" + (this.session.questions?.length || 0));
       if (this.session.fsmState !== "scanning_doc") {
-        return this._error(ws, "Not expecting document upload");
+        console.error("REJECTED: fsmState is " + this.session.fsmState + ", expected scanning_doc");
+        return this._error(ws, "Not expecting document upload (state=" + this.session.fsmState + ")");
       }
 
       const r2Key = data.r2_key;
