@@ -75,7 +75,7 @@ export class CheckinSession {
   }
 
   /* ------------------------------------------------------------------ */
-  /*  FSM: start → greeting + request camera                            */
+  /*  FSM: start → greeting                                             */
   /* ------------------------------------------------------------------ */
 
   async _handleStart(ws, data) {
@@ -100,7 +100,7 @@ export class CheckinSession {
     const bizName = this.session.businessConfig.name || "our office";
     const requiresScan = this.session.businessConfig.requires_id_scan;
 
-    // Send welcome
+    // Send welcome with ALL questions upfront
     this._send(ws, {
       type: "welcome",
       text: `Welcome to ${bizName}!`,
@@ -113,14 +113,12 @@ export class CheckinSession {
     });
 
     if (requiresScan) {
-      // ID scan first → camera before voice
       this.session.fsmState = "scanning_doc";
       this._send(ws, {
         type: "request_camera",
         text: "Please scan your ID document",
       });
     } else {
-      // No scan → straight to questions with voice
       this.session.fsmState = "asking_questions";
       this._sendQuestionsReady(ws);
     }
@@ -140,13 +138,12 @@ export class CheckinSession {
 
     this.session.idImageR2Key = r2Key;
 
-    // Attempt OCR — if anything fails, continue WITHOUT OCR (non-fatal)
+    // Try OCR — non-fatal, always continue
     let ocrOk = false;
     try {
       const obj = await this.env.R2_DOCS.get(r2Key);
       if (obj && this.env.AI) {
         const arrayBuffer = await obj.arrayBuffer();
-        // Safe base64 encoding (avoids call stack overflow for large images)
         const bytes = new Uint8Array(arrayBuffer);
         let binary = "";
         for (let i = 0; i < bytes.length; i += 8192) {
@@ -156,10 +153,7 @@ export class CheckinSession {
 
         const result = await this.env.AI.run("@cf/meta/llama-3.2-11b-vision-instruct", {
           image: base64,
-          prompt:
-            "Extract the following fields from this document in JSON format: " +
-            '{"name": "", "id_number": "", "date_of_birth": "", "address": ""}. ' +
-            "Return only valid JSON, no explanation.",
+          prompt: "Extract fields from this ID document as JSON: {\"name\": \"\", \"id_number\": \"\", \"date_of_birth\": \"\", \"address\": \"\"}. Return only JSON.",
         });
 
         const text = typeof result === "string" ? result : result?.response || "";
@@ -168,21 +162,18 @@ export class CheckinSession {
           this.session.ocrData = JSON.parse(jsonMatch[0]);
           ocrOk = true;
         }
-      } else if (!obj) {
-        console.error("R2 object not found:", r2Key);
       }
     } catch (err) {
       console.error("OCR error (non-fatal):", err);
     }
 
-    // Send OCR result (even if empty — frontend shows what was extracted)
+    // ALWAYS send both messages — never get stuck
     this._send(ws, {
       type: "ocr_result",
       fields: this.session.ocrData || {},
       success: ocrOk,
     });
 
-    // Always continue to questions — never get stuck
     this.session.fsmState = "asking_questions";
     this._sendQuestionsReady(ws);
   }
