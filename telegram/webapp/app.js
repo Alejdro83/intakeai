@@ -146,19 +146,33 @@ function initTelegram() {
 // ── DO WebSocket ───────────────────────────────────────────────────────────
 
 async function connectToDO() {
+    updateStatus('Connecting to server...');
     const wsUrl = `${CONFIG.API_URL.replace('https://', 'wss://').replace('http://', 'ws://')}/api/ws/${crypto.randomUUID()}`;
+    console.log('Connecting to DO:', wsUrl);
     state.doWs = new WebSocket(wsUrl);
 
     state.doWs.onopen = () => {
+        console.log('DO connected, sending start');
+        updateStatus('Loading business...');
         state.doWs.send(JSON.stringify({
             type: 'start',
             business_id: state.businessId || 'clinic-main',
         }));
     };
 
-    state.doWs.onmessage = (event) => handleDOMessage(JSON.parse(event.data));
-    state.doWs.onerror = (err) => console.error('DO WebSocket error:', err);
-    state.doWs.onclose = () => console.log('DO disconnected');
+    state.doWs.onmessage = (event) => {
+        const msg = JSON.parse(event.data);
+        console.log('DO message:', msg.type, msg);
+        handleDOMessage(msg);
+    };
+    state.doWs.onerror = (err) => {
+        console.error('DO WebSocket error:', err);
+        updateStatus('Connection error');
+    };
+    state.doWs.onclose = () => {
+        console.log('DO disconnected');
+        updateStatus('Disconnected');
+    };
 }
 
 // ── DO Message Handler ─────────────────────────────────────────────────────
@@ -168,22 +182,24 @@ function handleDOMessage(msg) {
 
     switch (msg.type) {
         case 'welcome':
+            console.log('Welcome received:', msg);
             state.businessName = msg.business_name || '';
             state.requiresIdScan = msg.requires_id_scan;
             state.questions = msg.questions || [];
-            // Update header with business name
             const headerTitle = document.getElementById('header-title');
             if (headerTitle) headerTitle.textContent = `Welcome to ${state.businessName}`;
-            updateStatus(msg.text || 'Connected');
+            updateStatus(`Welcome to ${state.businessName}!`);
             break;
 
         case 'request_camera':
+            console.log('Request camera received');
             updateStatus('Please scan your ID');
             showStep('scan');
             startCamera();
             break;
 
         case 'ocr_result':
+            console.log('OCR result received:', msg);
             state.ocrData = msg.fields;
             displayOCRResult(msg.fields);
             break;
