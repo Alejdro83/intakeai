@@ -190,6 +190,7 @@ function handleDOMessage(msg) {
 
         case 'questions_ready':
             console.log('Questions ready, OCR data:', state.ocrData);
+            clearTimeout(state.ocrTimeout); // Cancel timeout
             state.questions = msg.questions || state.questions;
             state.ocrData = msg.ocr_data || state.ocrData;
             state.businessName = msg.business_name || state.businessName;
@@ -273,11 +274,14 @@ async function captureFromCamera() {
 
 async function uploadAndProcess(blobOrFile, contentType) {
     elements.ocrLoading?.classList.remove('hidden');
+    updateStatus('Uploading document...');
 
     try {
+        console.log('Getting upload URL...');
         const urlResp = await fetch(`${CONFIG.API_URL}/api/upload-url`);
         if (!urlResp.ok) throw new Error('Failed to get upload URL');
         const { upload_url, r2_key } = await urlResp.json();
+        console.log('Upload URL received, uploading...');
 
         const putResp = await fetch(upload_url, {
             method: 'PUT',
@@ -285,18 +289,31 @@ async function uploadAndProcess(blobOrFile, contentType) {
             body: blobOrFile,
         });
         if (!putResp.ok) throw new Error('Upload failed');
+        console.log('Upload complete, sending to DO...');
 
         if (state.doWs?.readyState === 1) {
             state.doWs.send(JSON.stringify({ type: 'id_uploaded', r2_key }));
+            updateStatus('Processing document...');
+        } else {
+            throw new Error('Connection lost');
         }
 
         stopCamera();
-        updateStatus('Document uploaded, processing...');
+
+        // Timeout: if DO doesn't respond in 10s, proceed without OCR
+        state.ocrTimeout = setTimeout(() => {
+            console.warn('OCR timeout — proceeding without OCR');
+            updateStatus('Taking too long, continuing...');
+            showStep('voice');
+            connectToAssemblyAI().catch(err => {
+                console.error('Voice connection failed:', err);
+                updateStatus('Voice failed, try again');
+            });
+        }, 10000);
 
     } catch (err) {
         console.error('Upload error:', err);
-        updateStatus('Upload failed, please try again');
-    } finally {
+        updateStatus('Upload failed: ' + err.message);
         elements.ocrLoading?.classList.add('hidden');
     }
 }
