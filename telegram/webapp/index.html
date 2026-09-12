@@ -4,8 +4,6 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
     <meta name="theme-color" content="#2563eb">
-    <meta name="apple-mobile-web-app-capable" content="yes">
-    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
     <title>Virtualobby — Virtual Reception</title>
     <script src="https://telegram.org/js/telegram-web-app.js"></script>
     <link rel="stylesheet" href="style.css">
@@ -19,102 +17,45 @@
         }
     </script>
 
-    <header class="header" id="header">
+    <header class="header">
         <div class="header-content">
-            <div class="logo" id="logo">
-                <span class="logo-icon">🏥</span>
-                <h1 id="header-title">Welcome</h1>
-            </div>
-            <div class="status" id="status">
-                <span class="status-dot" id="status-dot"></span>
-                <span class="status-text" id="status-text">Connecting...</span>
-            </div>
+            <div class="logo"><span class="logo-icon">🏥</span><h1 id="header-title">Welcome</h1></div>
+            <div class="status"><span class="status-dot" id="status-dot"></span><span class="status-text" id="status-text">Connecting...</span></div>
         </div>
     </header>
 
     <main class="main">
-        <!-- Scan Document -->
+        <!-- Step 1: Scan ID -->
         <section class="step hidden" id="step-scan">
-            <div class="step-header">
-                <span class="step-number">1</span>
-                <h2>Identity Verification</h2>
-            </div>
-            <p class="step-description">First, let's verify your identity. Please scan or upload a photo of your ID document.</p>
+            <div class="step-header"><span class="step-number">1</span><h2>Identity Verification</h2></div>
+            <p class="step-description">First, let's verify your identity.<br>Upload a photo of your ID document.</p>
             
-            <!-- Camera preview (live if supported) -->
-            <div class="camera-container hidden" id="camera-container">
-                <video id="camera-preview" autoplay playsinline></video>
-                <canvas id="camera-canvas" class="hidden"></canvas>
-                <div class="camera-overlay">
-                    <div class="scan-frame"></div>
-                </div>
+            <div class="scan-actions">
+                <label class="btn btn-primary btn-scan-main" for="file-upload">📁 Upload File</label>
+                <input type="file" id="file-upload" accept="image/*" style="display:none;">
             </div>
             
-            <!-- Camera controls -->
-            <div class="camera-controls hidden" id="camera-controls">
-                <button class="btn btn-secondary" id="btn-switch-camera">🔄 Switch</button>
-                <button class="btn btn-primary btn-capture" id="btn-capture">📸 Capture</button>
-            </div>
-            
-            <!-- Divider -->
-            <div class="scan-divider"><span>or</span></div>
-            
-            <!-- File upload -->
-            <div class="scan-actions" id="scan-actions">
-                <label class="btn btn-primary btn-scan-main" for="file-upload-camera">📷 Take Photo</label>
-                <input type="file" id="file-upload-camera" accept="image/*" capture="environment" style="display: none;">
-                <label class="btn btn-secondary btn-scan-main" for="file-upload-gallery">🖼️ Choose from Gallery</label>
-                <input type="file" id="file-upload-gallery" accept="image/*" style="display: none;">
-            </div>
-            
-            <!-- Loading -->
-            <div class="loading hidden" id="ocr-loading">
-                <div class="spinner"></div>
-                <p>Scanning your document...</p>
-            </div>
-            
-            <!-- OCR Result -->
-            <div class="ocr-result hidden" id="ocr-result">
-                <div class="result-header">
-                    <span class="result-icon">✅</span>
-                    <h3>Document Scanned</h3>
-                </div>
-                <div class="result-fields" id="ocr-fields"></div>
-            </div>
+            <div class="loading hidden" id="ocr-loading"><div class="spinner"></div><p>Scanning document...</p></div>
+            <div class="ocr-result hidden" id="ocr-result"><div class="result-header"><span>✅</span><h3>Document Scanned</h3></div><div class="result-fields" id="ocr-fields"></div></div>
         </section>
 
-        <!-- Voice Interview -->
+        <!-- Step 2: Voice Interview -->
         <section class="step hidden" id="step-voice">
-            <div class="step-header">
-                <span class="step-number">2</span>
-                <h2>Check-in Interview</h2>
-            </div>
+            <div class="step-header"><span class="step-number">2</span><h2>Check-in Interview</h2></div>
             <div class="voice-container">
-                <div class="transcript" id="transcript">
-                    <div class="transcript-messages" id="transcript-messages"></div>
-                </div>
+                <div class="transcript"><div class="transcript-messages" id="transcript-messages"></div></div>
                 <div class="voice-controls">
-                    <button class="btn btn-voice" id="btn-voice">
-                        <span class="voice-icon">🎤</span>
-                        <span class="voice-text">Hold to speak</span>
-                    </button>
-                    <div class="voice-status" id="voice-status">
-                        <span class="voice-wave"></span>
-                        <span class="voice-label">Listening...</span>
-                    </div>
+                    <div class="voice-status"><span class="voice-wave"></span><span class="voice-label" id="voice-label">Listening...</span></div>
                 </div>
             </div>
         </section>
 
-        <!-- Confirmation -->
+        <!-- Step 3: Done -->
         <section class="step hidden" id="step-confirm">
-            <div class="step-header">
-                <span class="step-number">3</span>
-                <h2>Confirm Registration</h2>
-            </div>
+            <div class="step-header"><span class="step-number">3</span><h2>Registration Complete</h2></div>
             <div class="confirm-card">
                 <div class="confirm-icon">✅</div>
-                <h3>Registration Complete</h3>
+                <h3>All Done!</h3>
                 <p class="confirm-message" id="confirm-message"></p>
                 <div class="confirm-id" id="confirm-id"></div>
                 <button class="btn btn-primary btn-block" id="btn-new-visitor">New Visitor</button>
@@ -122,24 +63,10 @@
         </section>
     </main>
 
-    <footer class="footer">
-        <p>Powered by <strong>AssemblyAI</strong> Voice Agent API</p>
-        <div id="debug-log" style="margin-top:12px;padding:8px;background:#111;color:#0f0;font:11px monospace;max-height:180px;overflow-y:auto;border-radius:6px;text-align:left;word-break:break-all;white-space:pre-wrap;display:none;"></div>
-        <button onclick="document.getElementById('debug-log').style.display='block';this.style.display='none'" style="margin-top:6px;font-size:10px;opacity:0.4;border:none;background:none;color:#999;cursor:pointer;">Show Debug Log</button>
-    </footer>
+    <footer class="footer"><p>Powered by <strong>AssemblyAI</strong></p></footer>
 
     <script>
-        (function() {
-            let tapCount = 0, tapTimer = null;
-            const logo = document.getElementById('logo');
-            if (!logo) return;
-            logo.addEventListener('click', function() {
-                tapCount++;
-                clearTimeout(tapTimer);
-                tapTimer = setTimeout(function() { tapCount = 0; }, 800);
-                if (tapCount >= 3) { tapCount = 0; window.location.href = './admin.html'; }
-            });
-        })();
+        (function(){let t=0,T=null,l=document.getElementById('logo');if(!l)return;l.addEventListener('click',function(){t++;clearTimeout(T);T=setTimeout(function(){t=0},800);if(t>=3){t=0;location.href='./admin.html';}});})();
     </script>
     <script src="app.js"></script>
 </body>

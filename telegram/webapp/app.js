@@ -70,15 +70,12 @@ const state = {
     businessId: null, businessName: '', doWs: null, aaiWs: null,
     captureCtx: null, playbackCtx: null, playback: null, mic: null,
     aaiReady: false, questions: [], answers: {}, ocrData: null,
-    requiresIdScan: false, cameraFacing: 'environment', mediaStream: null,
-    voiceConnecting: false,
+    requiresIdScan: false, voiceConnecting: false,
 };
 
 const $ = (id) => document.getElementById(id) || document.querySelector(`.${id}`);
 const elements = {
     stepScan: $('step-scan'), stepVoice: $('step-voice'), stepConfirm: $('step-confirm'),
-    cameraContainer: $('camera-container'), cameraPreview: $('camera-preview'),
-    cameraCanvas: $('camera-canvas'), cameraControls: $('camera-controls'),
     ocrResult: $('ocr-result'), ocrFields: $('ocr-fields'), ocrLoading: $('ocr-loading'),
     scanActions: $('scan-actions'), transcriptMessages: $('transcript-messages'),
     statusDot: $('status-dot'), statusText: $('status-text'),
@@ -202,9 +199,8 @@ function handleDOMessage(msg) {
 
         case 'request_camera':
             dbg('Request camera received');
-            updateStatus('Please scan your ID');
+            updateStatus('Please upload your ID');
             showStep('scan');
-            startCamera();
             break;
 
         case 'ocr_result':
@@ -221,7 +217,6 @@ function handleDOMessage(msg) {
             state.ocrData = msg.ocr_data || state.ocrData;
             state.businessName = msg.business_name || state.businessName;
             dbg('Questions count: ' + state.questions.length + ' ocrData: ' + JSON.stringify(state.ocrData));
-            stopCamera();
             updateStatus('Connecting voice...');
             showStep('voice');
             connectToAssemblyAI().catch(err => {
@@ -247,36 +242,6 @@ function handleDOMessage(msg) {
             dbg('Unknown DO message type: ' + msg.type);
             break;
     }
-}
-
-// ── Camera ─────────────────────────────────────────────────────────────────
-
-async function startCamera() {
-    dbg('Starting camera...');
-    try {
-        if (state.mediaStream) state.mediaStream.getTracks().forEach(t => t.stop());
-        state.mediaStream = await navigator.mediaDevices.getUserMedia({
-            video: { facingMode: state.cameraFacing, width: { ideal: 1280 }, height: { ideal: 720 } },
-        });
-        elements.cameraPreview.srcObject = state.mediaStream;
-        elements.cameraContainer?.classList.remove('hidden');
-        elements.cameraControls?.classList.remove('hidden');
-        dbg('Camera started OK');
-    } catch (err) {
-        dbg('Camera not available: ' + err.message);
-        elements.cameraContainer?.classList.add('hidden');
-        elements.cameraControls?.classList.add('hidden');
-    }
-}
-
-function stopCamera() { if (state.mediaStream) { state.mediaStream.getTracks().forEach(t => t.stop()); state.mediaStream = null; } }
-
-async function captureFromCamera() {
-    const v = elements.cameraPreview, c = elements.cameraCanvas;
-    c.width = v.videoWidth; c.height = v.videoHeight;
-    c.getContext('2d').drawImage(v, 0, 0);
-    const blob = await new Promise(r => c.toBlob(r, 'image/jpeg', 0.8));
-    await uploadAndProcess(blob, 'image/jpeg');
 }
 
 // ── Upload ─────────────────────────────────────────────────────────────────
@@ -599,10 +564,11 @@ function cleanupAudio() {
 // ── Events ─────────────────────────────────────────────────────────────────
 
 function initEventListeners() {
-    $('btn-switch-camera')?.addEventListener('click', () => { state.cameraFacing = state.cameraFacing === 'user' ? 'environment' : 'user'; startCamera(); });
-    $('btn-capture')?.addEventListener('click', captureFromCamera);
-    $('file-upload-camera')?.addEventListener('change', (e) => { if (e.target.files?.[0]) uploadAndProcess(e.target.files[0], e.target.files[0].type); });
-    $('file-upload-gallery')?.addEventListener('change', (e) => { if (e.target.files?.[0]) uploadAndProcess(e.target.files[0], e.target.files[0].type); });
+    // Single file upload button
+    $('file-upload')?.addEventListener('change', (e) => {
+        const file = e.target.files?.[0];
+        if (file) uploadAndProcess(file, file.type);
+    });
     elements.btnNewVisitor?.addEventListener('click', () => {
         state.answers = {}; state.ocrData = null;
         if (elements.transcriptMessages) elements.transcriptMessages.innerHTML = '';
