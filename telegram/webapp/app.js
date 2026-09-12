@@ -304,9 +304,12 @@ async function uploadAndProcess(blobOrFile, contentType) {
         if (!putResp.ok) throw new Error('Upload failed: ' + putResp.status);
         dbg('Upload complete');
 
-        if (state.doWs?.readyState !== 1) throw new Error('DO connection lost');
+        if (state.doWs?.readyState !== 1) {
+            dbg('DO NOT READY: readyState=' + (state.doWs?.readyState || 'null'));
+            throw new Error('DO connection lost');
+        }
         const idMsg = { type: 'id_uploaded', r2_key };
-        dbg('Sending to DO: ' + JSON.stringify(idMsg));
+        dbg('Sending to DO: readyState=' + state.doWs.readyState + ' url=' + state.doWs.url + ' msg=' + JSON.stringify(idMsg));
         state.doWs.send(JSON.stringify(idMsg));
         updateStatus('Processing document...');
 
