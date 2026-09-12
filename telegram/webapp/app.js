@@ -304,18 +304,23 @@ async function uploadAndProcess(blobOrFile, contentType) {
 // ── AssemblyAI Voice Agent ─────────────────────────────────────────────────
 
 async function connectToAssemblyAI() {
+    console.log('connectToAssemblyAI called');
     try {
+        console.log('Fetching token...');
         const tokenResp = await fetch(`${CONFIG.API_URL}/api/token`);
         if (!tokenResp.ok) throw new Error('Failed to get token');
         const { token } = await tokenResp.json();
+        console.log('Token received, setting up audio...');
 
         state.captureCtx = new AudioContext({ sampleRate: WIRE_RATE });
         state.playbackCtx = new AudioContext({ sampleRate: WIRE_RATE });
+        console.log('AudioContext created, requesting microphone...');
 
         const stream = await navigator.mediaDevices.getUserMedia({
             audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true },
         });
         state.mic = stream;
+        console.log('Microphone access granted');
 
         const source = state.captureCtx.createMediaStreamSource(stream);
         const capture = await addWorklet(state.captureCtx, CAPTURE_WORKLET, 'capture');
