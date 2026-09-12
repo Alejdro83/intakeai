@@ -15,9 +15,7 @@
     <link rel="stylesheet" href="style.css">
 </head>
 <body>
-    <!-- Telegram Mini App init -->
     <script>
-        // Initialize Telegram Mini App if available
         if (window.Telegram && window.Telegram.WebApp) {
             window.Telegram.WebApp.ready();
             window.Telegram.WebApp.expand();
@@ -25,7 +23,6 @@
         }
     </script>
 
-    <!-- ── Header ───────────────────────────────────────────────── -->
     <header class="header" id="header">
         <div class="header-content">
             <div class="logo" id="logo">
@@ -39,7 +36,6 @@
         </div>
     </header>
 
-    <!-- ── Main Content ─────────────────────────────────────────── -->
     <main class="main">
         <!-- Scan Document -->
         <section class="step hidden" id="step-scan">
@@ -49,16 +45,29 @@
             </div>
             <p class="step-description">Take a photo of your ID document</p>
             
-            <!-- Primary: native file input with capture (works in Telegram WebView) -->
+            <!-- Camera preview (live if supported) -->
+            <div class="camera-container" id="camera-container">
+                <video id="camera-preview" autoplay playsinline></video>
+                <canvas id="camera-canvas" class="hidden"></canvas>
+                <div class="camera-overlay">
+                    <div class="scan-frame"></div>
+                </div>
+            </div>
+            
+            <!-- Camera controls -->
+            <div class="camera-controls" id="camera-controls">
+                <button class="btn btn-secondary" id="btn-switch-camera">🔄 Switch</button>
+                <button class="btn btn-primary btn-capture" id="btn-capture">📸 Capture</button>
+            </div>
+            
+            <!-- Divider -->
+            <div class="scan-divider"><span>or</span></div>
+            
+            <!-- File upload fallback -->
             <div class="scan-actions" id="scan-actions">
-                <label class="btn btn-primary btn-scan-main" for="file-upload-camera">
-                    📸 Take Photo
-                </label>
+                <label class="btn btn-secondary btn-scan-main" for="file-upload-camera">📷 Take Photo</label>
                 <input type="file" id="file-upload-camera" accept="image/*" capture="environment" style="display: none;">
-                
-                <label class="btn btn-secondary btn-scan-main" for="file-upload-gallery">
-                    🖼️ Choose from Gallery
-                </label>
+                <label class="btn btn-secondary btn-scan-main" for="file-upload-gallery">🖼️ Gallery</label>
                 <input type="file" id="file-upload-gallery" accept="image/*" style="display: none;">
             </div>
             
@@ -84,14 +93,10 @@
                 <span class="step-number">2</span>
                 <h2>Check-in Interview</h2>
             </div>
-            
             <div class="voice-container">
-                <!-- Transcript -->
                 <div class="transcript" id="transcript">
                     <div class="transcript-messages" id="transcript-messages"></div>
                 </div>
-                
-                <!-- Voice Controls -->
                 <div class="voice-controls">
                     <button class="btn btn-voice" id="btn-voice">
                         <span class="voice-icon">🎤</span>
@@ -111,45 +116,33 @@
                 <span class="step-number">3</span>
                 <h2>Confirm Registration</h2>
             </div>
-            
             <div class="confirm-card">
                 <div class="confirm-icon">✅</div>
                 <h3>Registration Complete</h3>
                 <p class="confirm-message" id="confirm-message"></p>
                 <div class="confirm-id" id="confirm-id"></div>
-                
-                <button class="btn btn-primary btn-block" id="btn-new-visitor">
-                    New Visitor
-                </button>
+                <button class="btn btn-primary btn-block" id="btn-new-visitor">New Visitor</button>
             </div>
         </section>
     </main>
 
-    <!-- ── Footer ───────────────────────────────────────────────── -->
     <footer class="footer">
         <p>Powered by <strong>AssemblyAI</strong> Voice Agent API</p>
     </footer>
 
-    <!-- Admin access: triple-tap on logo to reveal admin link -->
     <script>
         (function() {
-            let tapCount = 0;
-            let tapTimer = null;
+            let tapCount = 0, tapTimer = null;
             const logo = document.getElementById('logo');
             if (!logo) return;
-
             logo.addEventListener('click', function() {
                 tapCount++;
                 clearTimeout(tapTimer);
                 tapTimer = setTimeout(function() { tapCount = 0; }, 800);
-                if (tapCount >= 3) {
-                    tapCount = 0;
-                    window.location.href = './admin.html';
-                }
+                if (tapCount >= 3) { tapCount = 0; window.location.href = './admin.html'; }
             });
         })();
     </script>
-
     <script src="app.js"></script>
 </body>
 </html>

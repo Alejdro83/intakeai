@@ -5,11 +5,8 @@
  *   WS1: Durable Object (state management, questions, OCR results)
  *   WS2: AssemblyAI Voice Agent (voice/audio capture + playback)
  *
- * Flow: parse start_param → connect DO → file upload/OCR → fetch token → connect AAI →
- *       voice confirmation of OCR data → voice Q&A → summary → done
+ * Flow: connect DO → camera/file upload → OCR → voice personalized → questions → done
  */
-
-// ── Configuration ──────────────────────────────────────────────────────────
 
 const CONFIG = {
     API_URL: 'https://virtualobby-api.alejdro.workers.dev',
@@ -17,59 +14,22 @@ const CONFIG = {
     tgApp: window.Telegram?.WebApp || null,
 };
 
-// ── Audio worklet code (from AssemblyAI JS starter) ────────────────────────
-
 const WIRE_RATE = 24_000;
 
 const CAPTURE_WORKLET = `
   class CaptureProcessor extends AudioWorkletProcessor {
-    constructor() {
-      super();
-      this._ratio = sampleRate / ${WIRE_RATE};
-      this._pos = 0;
-      this._prev = 0;
-      this._src = null;
-      this._out = null;
-    }
-    _toPcm(samples, len) {
-      const pcm = new Int16Array(len);
-      for (let i = 0; i < len; i++) {
-        const s = Math.max(-1, Math.min(1, samples[i]));
-        pcm[i] = s < 0 ? s * 0x8000 : s * 0x7fff;
-      }
-      return pcm;
-    }
+    constructor() { super(); this._ratio = sampleRate / ${WIRE_RATE}; this._pos = 0; this._prev = 0; this._src = null; this._out = null; }
+    _toPcm(samples, len) { const pcm = new Int16Array(len); for (let i = 0; i < len; i++) { const s = Math.max(-1, Math.min(1, samples[i])); pcm[i] = s < 0 ? s * 0x8000 : s * 0x7fff; } return pcm; }
     process(inputs) {
-      const ch = inputs[0]?.[0];
-      if (!ch) return true;
-      if (this._ratio === 1) {
-        const pcm = this._toPcm(ch, ch.length);
-        this.port.postMessage(pcm.buffer, [pcm.buffer]);
-        return true;
-      }
+      const ch = inputs[0]?.[0]; if (!ch) return true;
+      if (this._ratio === 1) { const pcm = this._toPcm(ch, ch.length); this.port.postMessage(pcm.buffer, [pcm.buffer]); return true; }
       const n = ch.length;
-      if (!this._src || this._src.length < n + 1) {
-        this._src = new Float32Array(n + 1);
-        this._out = new Float32Array(Math.ceil((n + 1) / this._ratio) + 2);
-      }
-      const src = this._src;
-      const out = this._out;
-      src[0] = this._prev;
-      src.set(ch, 1);
-      let outLen = 0;
-      let pos = this._pos;
-      while (pos < n) {
-        const i = Math.floor(pos);
-        const frac = pos - i;
-        out[outLen++] = src[i] + (src[i + 1] - src[i]) * frac;
-        pos += this._ratio;
-      }
-      this._pos = pos - n;
-      this._prev = ch[n - 1];
-      if (outLen) {
-        const pcm = this._toPcm(out, outLen);
-        this.port.postMessage(pcm.buffer, [pcm.buffer]);
-      }
+      if (!this._src || this._src.length < n + 1) { this._src = new Float32Array(n + 1); this._out = new Float32Array(Math.ceil((n + 1) / this._ratio) + 2); }
+      const src = this._src; const out = this._out; src[0] = this._prev; src.set(ch, 1);
+      let outLen = 0; let pos = this._pos;
+      while (pos < n) { const i = Math.floor(pos); const frac = pos - i; out[outLen++] = src[i] + (src[i + 1] - src[i]) * frac; pos += this._ratio; }
+      this._pos = pos - n; this._prev = ch[n - 1];
+      if (outLen) { const pcm = this._toPcm(out, outLen); this.port.postMessage(pcm.buffer, [pcm.buffer]); }
       return true;
     }
   }
@@ -79,69 +39,23 @@ const CAPTURE_WORKLET = `
 const PLAYBACK_WORKLET = `
   class PlaybackProcessor extends AudioWorkletProcessor {
     constructor() {
-      super();
-      this._ring = new Float32Array(sampleRate * 30);
-      this._writePos = 0;
-      this._readPos = 0;
-      this._available = 0;
-      this._step = ${WIRE_RATE} / sampleRate;
-      this._rsPos = 0;
-      this._rsPrev = 0;
-      this._drained = false;
+      super(); this._ring = new Float32Array(sampleRate * 30); this._writePos = 0; this._readPos = 0;
+      this._available = 0; this._step = ${WIRE_RATE} / sampleRate; this._rsPos = 0; this._rsPrev = 0; this._drained = false;
       this.port.onmessage = (e) => {
-        if (e.data === 'stop') {
-          this._writePos = this._readPos = this._available = 0;
-          this._rsPos = this._rsPrev = 0;
-          return;
-        }
-        const int16 = new Int16Array(e.data);
-        if (!int16.length) return;
-        if (this._drained) {
-          this._rsPrev = 0;
-          this._rsPos = 0;
-          this._drained = false;
-        }
-        if (this._step === 1) {
-          for (let i = 0; i < int16.length; i++) this._push(int16[i] / 32768);
-          return;
-        }
-        const n = int16.length;
-        let pos = this._rsPos;
-        while (pos < n) {
-          const i = Math.floor(pos);
-          const frac = pos - i;
-          const a = i === 0 ? this._rsPrev : int16[i - 1] / 32768;
-          const b = int16[i] / 32768;
-          this._push(a + (b - a) * frac);
-          pos += this._step;
-        }
-        this._rsPos = pos - n;
-        this._rsPrev = int16[n - 1] / 32768;
+        if (e.data === 'stop') { this._writePos = this._readPos = this._available = 0; this._rsPos = this._rsPrev = 0; return; }
+        const int16 = new Int16Array(e.data); if (!int16.length) return;
+        if (this._drained) { this._rsPrev = 0; this._rsPos = 0; this._drained = false; }
+        if (this._step === 1) { for (let i = 0; i < int16.length; i++) this._push(int16[i] / 32768); return; }
+        const n = int16.length; let pos = this._rsPos;
+        while (pos < n) { const i = Math.floor(pos); const frac = pos - i; const a = i === 0 ? this._rsPrev : int16[i - 1] / 32768; const b = int16[i] / 32768; this._push(a + (b - a) * frac); pos += this._step; }
+        this._rsPos = pos - n; this._rsPrev = int16[n - 1] / 32768;
       };
     }
-    _push(v) {
-      if (this._available < this._ring.length) {
-        this._ring[this._writePos] = v;
-        this._writePos = (this._writePos + 1) % this._ring.length;
-        this._available++;
-      }
-    }
+    _push(v) { if (this._available < this._ring.length) { this._ring[this._writePos] = v; this._writePos = (this._writePos + 1) % this._ring.length; this._available++; } }
     process(inputs, outputs) {
-      const output = outputs[0];
-      const out = output[0];
-      const cap = this._ring.length;
-      for (let i = 0; i < out.length; i++) {
-        if (this._available > 0) {
-          out[i] = this._ring[this._readPos];
-          this._readPos = (this._readPos + 1) % cap;
-          this._available--;
-        } else {
-          out[i] = 0;
-          this._drained = true;
-        }
-      }
-      for (let ch = 1; ch < output.length; ch++) output[ch].set(out);
-      return true;
+      const output = outputs[0]; const out = output[0]; const cap = this._ring.length;
+      for (let i = 0; i < out.length; i++) { if (this._available > 0) { out[i] = this._ring[this._readPos]; this._readPos = (this._readPos + 1) % cap; this._available--; } else { out[i] = 0; this._drained = true; } }
+      for (let ch = 1; ch < output.length; ch++) output[ch].set(out); return true;
     }
   }
   registerProcessor('playback', PlaybackProcessor);
@@ -160,14 +74,14 @@ const state = {
     mic: null,
     aaiReady: false,
     currentFsmState: 'idle',
-    currentQuestion: null,
     questions: [],
     answers: {},
     ocrData: null,
     requiresIdScan: false,
+    cameraFacing: 'environment',
+    mediaStream: null,
+    cameraAvailable: false,
 };
-
-// ── DOM Elements ───────────────────────────────────────────────────────────
 
 const $ = (id) => document.getElementById(id);
 
@@ -175,6 +89,10 @@ const elements = {
     stepScan: $('step-scan'),
     stepVoice: $('step-voice'),
     stepConfirm: $('step-confirm'),
+    cameraContainer: $('camera-container'),
+    cameraPreview: $('camera-preview'),
+    cameraCanvas: $('camera-canvas'),
+    cameraControls: $('camera-controls'),
     ocrResult: $('ocr-result'),
     ocrFields: $('ocr-fields'),
     ocrLoading: $('ocr-loading'),
@@ -214,49 +132,33 @@ function addMessage(who, text) {
     elements.transcriptMessages.scrollTop = elements.transcriptMessages.scrollHeight;
 }
 
-// ── Telegram Mini App Init ─────────────────────────────────────────────────
+// ── Telegram Init ──────────────────────────────────────────────────────────
 
 function initTelegram() {
     const tg = CONFIG.tgApp;
     if (!tg) return;
-
     tg.ready();
     tg.expand();
-
-    const initData = tg.initDataUnsafe || {};
-    const startParam = initData.start_param || '';
-    if (startParam) {
-        state.businessId = startParam;
-    }
+    const startParam = (tg.initDataUnsafe || {}).start_param || '';
+    if (startParam) state.businessId = startParam;
 }
 
 // ── DO WebSocket ───────────────────────────────────────────────────────────
 
 async function connectToDO() {
     const wsUrl = `${CONFIG.API_URL.replace('https://', 'wss://').replace('http://', 'ws://')}/api/ws/${crypto.randomUUID()}`;
-
     state.doWs = new WebSocket(wsUrl);
 
     state.doWs.onopen = () => {
-        console.log('DO connected, sending start');
         state.doWs.send(JSON.stringify({
             type: 'start',
             business_id: state.businessId || 'clinic-main',
         }));
     };
 
-    state.doWs.onmessage = (event) => {
-        const msg = JSON.parse(event.data);
-        handleDOMessage(msg);
-    };
-
-    state.doWs.onerror = (err) => {
-        console.error('DO WebSocket error:', err);
-    };
-
-    state.doWs.onclose = () => {
-        console.log('DO disconnected');
-    };
+    state.doWs.onmessage = (event) => handleDOMessage(JSON.parse(event.data));
+    state.doWs.onerror = (err) => console.error('DO WebSocket error:', err);
+    state.doWs.onclose = () => console.log('DO disconnected');
 }
 
 // ── DO Message Handler ─────────────────────────────────────────────────────
@@ -273,29 +175,27 @@ function handleDOMessage(msg) {
             break;
 
         case 'request_camera':
-            // ID scan required — show file upload buttons
             updateStatus('Please scan your ID');
             showStep('scan');
+            startCamera();
             break;
 
         case 'ocr_result':
-            // OCR done — show results
             state.ocrData = msg.fields;
             displayOCRResult(msg.fields);
             break;
 
         case 'questions_ready':
-            // All data loaded — connect voice with OCR data
             state.questions = msg.questions || state.questions;
             state.ocrData = msg.ocr_data || state.ocrData;
             state.businessName = msg.business_name || state.businessName;
+            stopCamera();
             showStep('voice');
             connectToAssemblyAI();
             break;
 
         case 'state':
             state.currentFsmState = msg.state;
-            state.currentQuestion = msg.question;
             updateStatus(`Question ${msg.index + 1}/${msg.total}: ${msg.question}`);
             break;
 
@@ -310,45 +210,81 @@ function handleDOMessage(msg) {
         case 'error':
             updateStatus('Error: ' + msg.message);
             break;
-
-        default:
-            console.log('Unknown DO message:', msg);
     }
 }
 
-// ── File Upload Handler ────────────────────────────────────────────────────
+// ── Camera ─────────────────────────────────────────────────────────────────
 
-async function handleFileUpload(file) {
-    if (!file) return;
+async function startCamera() {
+    try {
+        if (state.mediaStream) {
+            state.mediaStream.getTracks().forEach(t => t.stop());
+        }
+        state.mediaStream = await navigator.mediaDevices.getUserMedia({
+            video: { facingMode: state.cameraFacing, width: { ideal: 1280 }, height: { ideal: 720 } },
+        });
+        elements.cameraPreview.srcObject = state.mediaStream;
+        elements.cameraContainer?.classList.remove('hidden');
+        elements.cameraControls?.classList.remove('hidden');
+        state.cameraAvailable = true;
+    } catch (err) {
+        console.log('Camera not available, using file upload fallback:', err.message);
+        elements.cameraContainer?.classList.add('hidden');
+        elements.cameraControls?.classList.add('hidden');
+        state.cameraAvailable = false;
+    }
+}
 
+function stopCamera() {
+    if (state.mediaStream) {
+        state.mediaStream.getTracks().forEach(t => t.stop());
+        state.mediaStream = null;
+    }
+}
+
+// ── Capture from live camera ───────────────────────────────────────────────
+
+async function captureFromCamera() {
+    const video = elements.cameraPreview;
+    const canvas = elements.cameraCanvas;
+    canvas.width = video.videoWidth;
+    canvas.height = video.videoHeight;
+    canvas.getContext('2d').drawImage(video, 0, 0);
+
+    const blob = await new Promise(resolve =>
+        canvas.toBlob(resolve, 'image/jpeg', 0.8)
+    );
+
+    await uploadAndProcess(blob, 'image/jpeg');
+}
+
+// ── Upload file (from camera capture or file input) ────────────────────────
+
+async function uploadAndProcess(blobOrFile, contentType) {
     elements.ocrLoading?.classList.remove('hidden');
-    elements.scanActions?.classList.add('hidden');
 
     try {
-        // 1. Get presigned upload URL from Worker
         const urlResp = await fetch(`${CONFIG.API_URL}/api/upload-url`);
         if (!urlResp.ok) throw new Error('Failed to get upload URL');
         const { upload_url, r2_key } = await urlResp.json();
 
-        // 2. Upload image via PUT to presigned URL
         const putResp = await fetch(upload_url, {
             method: 'PUT',
-            headers: { 'Content-Type': file.type || 'image/jpeg' },
-            body: file,
+            headers: { 'Content-Type': contentType || 'image/jpeg' },
+            body: blobOrFile,
         });
         if (!putResp.ok) throw new Error('Upload failed');
 
-        // 3. Send R2 key to DO for server-side OCR
         if (state.doWs?.readyState === 1) {
             state.doWs.send(JSON.stringify({ type: 'id_uploaded', r2_key }));
         }
 
+        stopCamera();
         updateStatus('Document uploaded, processing...');
 
     } catch (err) {
         console.error('Upload error:', err);
         updateStatus('Upload failed, please try again');
-        elements.scanActions?.classList.remove('hidden');
     } finally {
         elements.ocrLoading?.classList.add('hidden');
     }
@@ -358,12 +294,10 @@ async function handleFileUpload(file) {
 
 async function connectToAssemblyAI() {
     try {
-        // 1. Get session token from Worker
         const tokenResp = await fetch(`${CONFIG.API_URL}/api/token`);
         if (!tokenResp.ok) throw new Error('Failed to get token');
         const { token } = await tokenResp.json();
 
-        // 2. Set up audio context for mic capture
         state.captureCtx = new AudioContext({ sampleRate: WIRE_RATE });
         state.playbackCtx = new AudioContext({ sampleRate: WIRE_RATE });
 
@@ -380,10 +314,8 @@ async function connectToAssemblyAI() {
         state.playback = await addWorklet(state.playbackCtx, PLAYBACK_WORKLET, 'playback');
         state.playback.connect(state.playbackCtx.destination);
 
-        // 3. Open AssemblyAI WebSocket
         state.aaiWs = new WebSocket(`${CONFIG.VOICE_AGENT_URL}?token=${token}`);
 
-        // Send captured audio to AssemblyAI
         capture.port.onmessage = ({ data }) => {
             if (!state.aaiReady || state.aaiWs?.readyState !== 1) return;
             const bytes = new Uint8Array(data);
@@ -395,14 +327,9 @@ async function connectToAssemblyAI() {
         };
 
         state.aaiWs.onopen = () => {
-            console.log('AAI connected, sending session.update');
-
             const ocrName = state.ocrData?.name || '';
             const ocrFields = state.ocrData
-                ? Object.entries(state.ocrData)
-                    .filter(([k, v]) => v && k !== 'name')
-                    .map(([k, v]) => `${k}: ${v}`)
-                    .join(', ')
+                ? Object.entries(state.ocrData).filter(([k, v]) => v && k !== 'name').map(([k, v]) => `${k}: ${v}`).join(', ')
                 : '';
 
             const ocrSection = ocrName
@@ -459,19 +386,9 @@ RULES:
             }));
         };
 
-        state.aaiWs.onmessage = ({ data }) => {
-            const msg = JSON.parse(data);
-            handleAAILogic(msg);
-        };
-
-        state.aaiWs.onerror = (err) => {
-            console.error('AAI WebSocket error:', err);
-        };
-
-        state.aaiWs.onclose = () => {
-            console.log('AAI WebSocket closed');
-            state.aaiReady = false;
-        };
+        state.aaiWs.onmessage = ({ data }) => handleAAILogic(JSON.parse(data));
+        state.aaiWs.onerror = (err) => console.error('AAI WebSocket error:', err);
+        state.aaiWs.onclose = () => { console.log('AAI WebSocket closed'); state.aaiReady = false; };
 
     } catch (err) {
         console.error('AssemblyAI connection error:', err);
@@ -485,7 +402,6 @@ function handleAAILogic(msg) {
     switch (msg.type) {
         case 'session.ready':
             state.aaiReady = true;
-            console.log('AAI session ready');
             updateStatus('Voice ready');
             break;
 
@@ -512,7 +428,6 @@ function handleAAILogic(msg) {
 
         case 'transcript.user':
             addMessage('user', msg.text);
-            state.lastUserTranscript = msg.text;
             break;
 
         case 'transcript.agent':
@@ -520,24 +435,18 @@ function handleAAILogic(msg) {
             break;
 
         case 'session.ended':
-            console.log('AAI session ended');
             state.aaiReady = false;
             break;
 
         case 'session.error':
-            console.error('AAI error:', msg.message);
             updateStatus('Voice error: ' + msg.message);
             break;
 
         case 'tool.call':
             if (msg.name === 'submit_answer') {
                 const answer = msg.arguments?.answer || '';
-                console.log('Agent submitted answer:', answer);
                 if (state.doWs?.readyState === 1) {
-                    state.doWs.send(JSON.stringify({
-                        type: 'user_transcript',
-                        text: answer,
-                    }));
+                    state.doWs.send(JSON.stringify({ type: 'user_transcript', text: answer }));
                 }
                 if (state.aaiWs?.readyState === 1) {
                     state.aaiWs.send(JSON.stringify({
@@ -548,9 +457,6 @@ function handleAAILogic(msg) {
                 }
             }
             break;
-
-        default:
-            break;
     }
 }
 
@@ -558,11 +464,7 @@ function handleAAILogic(msg) {
 
 async function addWorklet(ctx, code, name) {
     const url = URL.createObjectURL(new Blob([code], { type: 'application/javascript' }));
-    try {
-        await ctx.audioWorklet.addModule(url);
-    } finally {
-        URL.revokeObjectURL(url);
-    }
+    try { await ctx.audioWorklet.addModule(url); } finally { URL.revokeObjectURL(url); }
     return new AudioWorkletNode(ctx, name);
 }
 
@@ -574,13 +476,9 @@ function displayOCRResult(fields) {
     container.innerHTML = '';
 
     const labels = {
-        name: 'Name',
-        full_name: 'Name',
-        id_number: 'ID Number',
-        date_of_birth: 'Date of Birth',
-        nationality: 'Nationality',
-        expiry_date: 'Expiry Date',
-        address: 'Address',
+        name: 'Name', full_name: 'Name', id_number: 'ID Number',
+        date_of_birth: 'Date of Birth', nationality: 'Nationality',
+        expiry_date: 'Expiry Date', address: 'Address',
     };
 
     for (const [key, value] of Object.entries(fields || {})) {
@@ -600,16 +498,10 @@ function displayOCRResult(fields) {
 function showSummary(answers, ocr) {
     updateStatus('Review your check-in');
     let summary = '📋 Check-in Summary:\n';
-    if (answers) {
-        for (const [q, a] of Object.entries(answers)) {
-            summary += `• ${q}: ${a}\n`;
-        }
-    }
+    if (answers) for (const [q, a] of Object.entries(answers)) summary += `• ${q}: ${a}\n`;
     if (ocr) {
         summary += '\n📄 Document:\n';
-        for (const [k, v] of Object.entries(ocr)) {
-            if (v) summary += `• ${k}: ${v}\n`;
-        }
+        for (const [k, v] of Object.entries(ocr)) if (v) summary += `• ${k}: ${v}\n`;
     }
     addMessage('agent', summary);
 }
@@ -617,12 +509,8 @@ function showSummary(answers, ocr) {
 function showDone(registrationId) {
     updateStatus('Check-in complete');
     showStep('confirm');
-    if (elements.confirmMessage) {
-        elements.confirmMessage.textContent = 'Your check-in is complete!';
-    }
-    if (elements.confirmId) {
-        elements.confirmId.textContent = `Registration ID: ${registrationId}`;
-    }
+    if (elements.confirmMessage) elements.confirmMessage.textContent = 'Your check-in is complete!';
+    if (elements.confirmId) elements.confirmId.textContent = `Registration ID: ${registrationId}`;
     cleanupAudio();
 }
 
@@ -644,33 +532,35 @@ function cleanupAudio() {
 // ── Event Listeners ────────────────────────────────────────────────────────
 
 function initEventListeners() {
-    // File upload — camera capture (primary for Telegram WebView)
-    const fileCamera = $('file-upload-camera');
-    if (fileCamera) {
-        fileCamera.addEventListener('change', (e) => {
-            handleFileUpload(e.target.files?.[0]);
-        });
-    }
+    // Camera switch
+    $('btn-switch-camera')?.addEventListener('click', () => {
+        state.cameraFacing = state.cameraFacing === 'user' ? 'environment' : 'user';
+        startCamera();
+    });
+
+    // Camera capture
+    $('btn-capture')?.addEventListener('click', captureFromCamera);
+
+    // File upload — camera
+    $('file-upload-camera')?.addEventListener('change', (e) => {
+        if (e.target.files?.[0]) uploadAndProcess(e.target.files[0], e.target.files[0].type);
+    });
 
     // File upload — gallery
-    const fileGallery = $('file-upload-gallery');
-    if (fileGallery) {
-        fileGallery.addEventListener('change', (e) => {
-            handleFileUpload(e.target.files?.[0]);
-        });
-    }
+    $('file-upload-gallery')?.addEventListener('change', (e) => {
+        if (e.target.files?.[0]) uploadAndProcess(e.target.files[0], e.target.files[0].type);
+    });
 
     // New visitor
     elements.btnNewVisitor?.addEventListener('click', () => {
         state.answers = {};
         state.ocrData = null;
-        elements.transcriptMessages && (elements.transcriptMessages.innerHTML = '');
+        if (elements.transcriptMessages) elements.transcriptMessages.innerHTML = '';
         cleanupAudio();
         if (state.doWs) { state.doWs.close(); state.doWs = null; }
         connectToDO();
     });
 
-    // Cleanup on page unload
     window.addEventListener('beforeunload', () => {
         cleanupAudio();
         state.doWs?.close();
@@ -681,17 +571,11 @@ function initEventListeners() {
 
 async function init() {
     console.log('Virtualobby initializing...');
-
     initTelegram();
-
-    if (!state.businessId) {
-        state.businessId = 'clinic-main';
-    }
-
+    if (!state.businessId) state.businessId = 'clinic-main';
     initEventListeners();
     updateStatus('Connecting...');
     await connectToDO();
-
     console.log('Virtualobby initialized, business_id:', state.businessId);
 }
 

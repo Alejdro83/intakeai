@@ -670,3 +670,22 @@ body.telegram-webapp {
     font-weight: 600;
     color: var(--text-dark, #1d1b16);
 }
+
+/* ── Scan Divider ──────────────────────────────────────────────────── */
+
+.scan-divider {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin: 12px 0;
+    color: var(--text-muted, #777673);
+    font-size: 13px;
+}
+
+.scan-divider::before,
+.scan-divider::after {
+    content: '';
+    flex: 1;
+    height: 1px;
+    background: var(--border, #dad7cb);
+}
