@@ -12,6 +12,19 @@ const CONFIG = {
 
 const WIRE_RATE = 24_000;
 
+// ── Debug Log (visible in UI) ────────────────────────────────────────────
+
+const _debugLines = [];
+function dbg(msg) {
+    const ts = new Date().toLocaleTimeString('en', { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' });
+    const line = `[${ts}] ${msg}`;
+    _debugLines.push(line);
+    if (_debugLines.length > 80) _debugLines.shift();
+    console.log(line);
+    const el = document.getElementById('debug-log');
+    if (el) { el.textContent = _debugLines.join('\n'); el.scrollTop = el.scrollHeight; }
+}
+
 const CAPTURE_WORKLET = `
   class CaptureProcessor extends AudioWorkletProcessor {
     constructor() { super(); this._ratio = sampleRate / ${WIRE_RATE}; this._pos = 0; this._prev = 0; }
@@ -61,7 +74,7 @@ const state = {
     voiceConnecting: false,
 };
 
-const $ = (id) => document.getElementById(id);
+const $ = (id) => document.getElementById(id) || document.querySelector(`.${id}`);
 const elements = {
     stepScan: $('step-scan'), stepVoice: $('step-voice'), stepConfirm: $('step-confirm'),
     cameraContainer: $('camera-container'), cameraPreview: $('camera-preview'),
@@ -75,11 +88,13 @@ const elements = {
 // ── Helpers ────────────────────────────────────────────────────────────────
 
 function updateStatus(text) {
+    dbg('STATUS: ' + text);
     if (elements.statusText) elements.statusText.textContent = text;
     if (elements.statusDot) elements.statusDot.className = 'status-dot ' + (text.includes('Listening') ? 'listening' : text.includes('Speaking') ? 'speaking' : '');
 }
 
 function showStep(step) {
+    dbg('STEP → ' + step);
     [{ scan: elements.stepScan, voice: elements.stepVoice, confirm: elements.stepConfirm }].forEach(steps => {
         for (const [k, el] of Object.entries(steps)) if (el) el.classList.toggle('hidden', k !== step);
     });
@@ -95,17 +110,20 @@ function addMessage(who, text) {
 // ── Init ───────────────────────────────────────────────────────────────────
 
 function initTelegram() {
-    const tg = CONFIG.tgApp; if (!tg) return;
+    const tg = CONFIG.tgApp; if (!tg) { dbg('No Telegram WebApp object'); return; }
     tg.ready(); tg.expand();
     const sp = (tg.initDataUnsafe || {}).start_param || '';
+    dbg('start_param: ' + (sp || '(none)'));
     if (sp) state.businessId = sp;
 }
 
 async function init() {
+    dbg('=== APP INIT START ===');
     initTelegram();
-    if (!state.businessId) state.businessId = 'clinic-main';
+    if (!state.businessId) { state.businessId = 'clinic-main'; dbg('Using default businessId: clinic-main'); }
     initEventListeners();
     updateStatus('Connecting...');
+    dbg('Calling connectToDO()...');
     await connectToDO();
 }
 
@@ -113,73 +131,128 @@ async function init() {
 
 async function connectToDO() {
     const wsUrl = `${CONFIG.API_URL.replace('https://', 'wss://')}/api/ws/${crypto.randomUUID()}`;
+    dbg('DO WS URL: ' + wsUrl);
     state.doWs = new WebSocket(wsUrl);
 
+    // Timeout: if WebSocket doesn't open in 10s, show error
+    const connectTimeout = setTimeout(() => {
+        if (state.doWs && state.doWs.readyState !== WebSocket.OPEN) {
+            dbg('ERROR: DO WebSocket timed out after 10s');
+            updateStatus('Connection timed out — check network');
+        }
+    }, 10000);
+
     state.doWs.onopen = () => {
-        state.doWs.send(JSON.stringify({ type: 'start', business_id: state.businessId }));
+        clearTimeout(connectTimeout);
+        dbg('DO WebSocket OPENED ✓');
+        const startMsg = { type: 'start', business_id: state.businessId };
+        dbg('Sending to DO: ' + JSON.stringify(startMsg));
+        state.doWs.send(JSON.stringify(startMsg));
+        updateStatus('Loading business...');
     };
 
-    state.doWs.onmessage = (e) => handleDOMessage(JSON.parse(e.data));
-    state.doWs.onerror = () => updateStatus('Connection error');
-    state.doWs.onclose = () => console.log('DO disconnected');
+    state.doWs.onmessage = (e) => {
+        dbg('DO MSG raw: ' + (typeof e.data === 'string' ? e.data.substring(0, 200) : '(binary)'));
+        try {
+            const msg = JSON.parse(e.data);
+            handleDOMessage(msg);
+        } catch (err) {
+            dbg('ERROR parsing DO message: ' + err.message);
+        }
+    };
+
+    state.doWs.onerror = (err) => {
+        clearTimeout(connectTimeout);
+        dbg('DO WebSocket ERROR');
+        updateStatus('Connection error — check network');
+    };
+
+    state.doWs.onclose = (ev) => {
+        clearTimeout(connectTimeout);
+        dbg('DO WebSocket CLOSED code=' + ev.code + ' reason=' + (ev.reason || '(none)'));
+        if (ev.code !== 1000 && ev.code !== 1005) {
+            updateStatus('Connection closed: ' + (ev.reason || 'code ' + ev.code));
+        }
+    };
 }
 
 function handleDOMessage(msg) {
-    console.log('DO ←', msg.type);
+    dbg('DO ← type=' + msg.type);
 
     switch (msg.type) {
         case 'welcome':
             state.businessName = msg.business_name || '';
             state.requiresIdScan = msg.requires_id_scan;
             state.questions = msg.questions || [];
+            dbg('Welcome: biz=' + state.businessName + ' requiresIdScan=' + state.requiresIdScan + ' questions=' + state.questions.length);
             const ht = $('header-title');
             if (ht) ht.textContent = `Welcome to ${state.businessName}`;
             updateStatus(`Welcome to ${state.businessName}!`);
-            // If no scan required, go straight to voice
             if (!state.requiresIdScan) {
+                dbg('No ID scan required → going straight to voice');
                 showStep('voice');
-                connectToAssemblyAI();
+                connectToAssemblyAI().catch(err => {
+                    dbg('Voice failed: ' + err.message);
+                    updateStatus('Voice failed: ' + err.message);
+                });
+            } else {
+                dbg('ID scan required → waiting for request_camera');
             }
             break;
 
         case 'request_camera':
+            dbg('Request camera received');
             updateStatus('Please scan your ID');
             showStep('scan');
             startCamera();
             break;
 
         case 'ocr_result':
+            dbg('OCR result received, success=' + msg.success);
             state.ocrData = msg.fields;
+            elements.ocrLoading?.classList.add('hidden');
             displayOCRResult(msg.fields);
             break;
 
         case 'questions_ready':
+            dbg('Questions ready received, clearing OCR timeout');
             clearTimeout(state.ocrTimeout);
             state.questions = msg.questions || state.questions;
             state.ocrData = msg.ocr_data || state.ocrData;
             state.businessName = msg.business_name || state.businessName;
+            dbg('Questions count: ' + state.questions.length + ' ocrData: ' + JSON.stringify(state.ocrData));
             stopCamera();
             updateStatus('Connecting voice...');
             showStep('voice');
             connectToAssemblyAI().catch(err => {
-                console.error('Voice failed:', err);
-                updateStatus('Voice failed — try refreshing');
+                dbg('Voice failed: ' + err.message);
+                updateStatus('Voice failed: ' + err.message);
             });
             break;
 
         case 'state':
+            dbg('Question state: ' + (msg.index + 1) + '/' + msg.total + ': ' + msg.question);
             updateStatus(`Question ${msg.index + 1}/${msg.total}: ${msg.question}`);
             break;
 
         case 'summary': showSummary(msg.answers, msg.ocr); break;
         case 'checkin_complete': showDone(msg.registration_id); break;
-        case 'error': updateStatus('Error: ' + msg.message); break;
+
+        case 'error':
+            dbg('DO ERROR: ' + msg.message);
+            updateStatus('Error: ' + msg.message);
+            break;
+
+        default:
+            dbg('Unknown DO message type: ' + msg.type);
+            break;
     }
 }
 
 // ── Camera ─────────────────────────────────────────────────────────────────
 
 async function startCamera() {
+    dbg('Starting camera...');
     try {
         if (state.mediaStream) state.mediaStream.getTracks().forEach(t => t.stop());
         state.mediaStream = await navigator.mediaDevices.getUserMedia({
@@ -188,8 +261,9 @@ async function startCamera() {
         elements.cameraPreview.srcObject = state.mediaStream;
         elements.cameraContainer?.classList.remove('hidden');
         elements.cameraControls?.classList.remove('hidden');
+        dbg('Camera started OK');
     } catch (err) {
-        console.log('Camera not available:', err.message);
+        dbg('Camera not available: ' + err.message);
         elements.cameraContainer?.classList.add('hidden');
         elements.cameraControls?.classList.add('hidden');
     }
@@ -212,30 +286,36 @@ async function uploadAndProcess(blobOrFile, contentType) {
     updateStatus('Uploading...');
 
     try {
+        dbg('Fetching upload URL...');
         const urlResp = await fetch(`${CONFIG.API_URL}/api/upload-url`);
-        if (!urlResp.ok) throw new Error('Upload URL failed');
+        if (!urlResp.ok) { const t = await urlResp.text(); throw new Error('Upload URL failed: ' + urlResp.status + ' ' + t); }
         const { upload_url, r2_key } = await urlResp.json();
+        dbg('Upload URL OK, r2_key=' + r2_key);
 
+        dbg('Uploading blob to R2...');
         const putResp = await fetch(upload_url, { method: 'PUT', headers: { 'Content-Type': contentType || 'image/jpeg' }, body: blobOrFile });
-        if (!putResp.ok) throw new Error('Upload failed');
+        if (!putResp.ok) throw new Error('Upload failed: ' + putResp.status);
+        dbg('Upload complete');
 
-        if (state.doWs?.readyState !== 1) throw new Error('Connection lost');
-        state.doWs.send(JSON.stringify({ type: 'id_uploaded', r2_key }));
+        if (state.doWs?.readyState !== 1) throw new Error('DO connection lost');
+        const idMsg = { type: 'id_uploaded', r2_key };
+        dbg('Sending to DO: ' + JSON.stringify(idMsg));
+        state.doWs.send(JSON.stringify(idMsg));
         updateStatus('Processing document...');
 
         // Safety timeout: if DO doesn't respond in 15s, skip OCR and go to voice
         state.ocrTimeout = setTimeout(() => {
-            console.warn('OCR timeout — going to voice without OCR');
-            updateStatus('Connecting voice...');
+            dbg('OCR TIMEOUT (15s) — going to voice without OCR');
+            updateStatus('Connecting voice (OCR timeout)...');
             showStep('voice');
             connectToAssemblyAI().catch(err => {
-                console.error('Voice failed:', err);
-                updateStatus('Voice failed — try refreshing');
+                dbg('Voice failed after OCR timeout: ' + err.message);
+                updateStatus('Voice failed: ' + err.message);
             });
         }, 15000);
 
     } catch (err) {
-        console.error('Upload error:', err);
+        dbg('Upload error: ' + err.message);
         updateStatus('Upload failed: ' + err.message);
         elements.ocrLoading?.classList.add('hidden');
     }
@@ -246,52 +326,91 @@ async function uploadAndProcess(blobOrFile, contentType) {
 async function connectToAssemblyAI() {
     // Guard: prevent double-calling (OCR timeout + questions_ready race)
     if (state.voiceConnecting || state.aaiWs) {
-        console.log('Already connecting/connected to voice, skipping');
+        dbg('Voice already connecting/connected — SKIPPING');
         return;
     }
     state.voiceConnecting = true;
 
-    console.log('Connecting to AssemblyAI...');
+    dbg('connectToAssemblyAI() START');
 
     // 1. Get token
     let token;
     try {
-        const tokenResp = await fetch(`${CONFIG.API_URL}/api/token`);
-        if (!tokenResp.ok) throw new Error(`Token HTTP ${tokenResp.status}`);
+        const tokenUrl = `${CONFIG.API_URL}/api/token`;
+        dbg('Fetching token from: ' + tokenUrl);
+        const tokenResp = await fetch(tokenUrl);
+        dbg('Token response status: ' + tokenResp.status);
+        if (!tokenResp.ok) {
+            const errBody = await tokenResp.text();
+            dbg('Token error body: ' + errBody);
+            throw new Error(`Token HTTP ${tokenResp.status}: ${errBody}`);
+        }
         const data = await tokenResp.json();
         token = data.token;
-        if (!token) throw new Error('No token in response: ' + JSON.stringify(data));
-        console.log('Token received');
+        if (!token) {
+            dbg('Token response data: ' + JSON.stringify(data));
+            throw new Error('No token in response');
+        }
+        dbg('Token received ✓ (length=' + token.length + ')');
     } catch (e) {
         state.voiceConnecting = false;
+        dbg('TOKEN FETCH FAILED: ' + e.message);
         throw new Error('Token fetch failed: ' + e.message);
     }
 
     // 2. Set up audio
+    dbg('Creating AudioContexts at ' + WIRE_RATE + ' Hz...');
     state.captureCtx = new AudioContext({ sampleRate: WIRE_RATE });
     state.playbackCtx = new AudioContext({ sampleRate: WIRE_RATE });
-    // Resume both contexts — mobile browsers (esp. Telegram WebView) start them suspended
+    dbg('captureCtx.state=' + state.captureCtx.state + ' playbackCtx.state=' + state.playbackCtx.state);
+
     await state.captureCtx.resume();
     await state.playbackCtx.resume();
-    console.log('AudioContexts resumed, state:', state.captureCtx.state, state.playbackCtx.state);
+    dbg('After resume: capture=' + state.captureCtx.state + ' playback=' + state.playbackCtx.state);
 
-    const stream = await navigator.mediaDevices.getUserMedia({
-        audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true },
-    });
+    updateStatus('Requesting microphone...');
+    let stream;
+    try {
+        dbg('Calling getUserMedia...');
+        stream = await Promise.race([
+            navigator.mediaDevices.getUserMedia({
+                audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+            }),
+            new Promise((_, reject) => setTimeout(() => reject(new Error('Mic permission timeout (10s)')), 10000)),
+        ]);
+        dbg('getUserMedia OK, tracks=' + stream.getAudioTracks().length);
+    } catch (micErr) {
+        dbg('MIC FAILED: ' + micErr.message);
+        state.voiceConnecting = false;
+        state.captureCtx?.close(); state.playbackCtx?.close();
+        state.captureCtx = state.playbackCtx = null;
+        throw new Error('Microphone access failed: ' + micErr.message);
+    }
     state.mic = stream;
-    console.log('Mic granted');
 
+    dbg('Setting up capture worklet...');
     const source = state.captureCtx.createMediaStreamSource(stream);
     const capture = await addWorklet(state.captureCtx, CAPTURE_WORKLET, 'capture');
     source.connect(capture);
-    // NOTE: do NOT connect capture to destination — it only posts PCM via port.onmessage,
-    // connecting to speakers causes feedback and can block the playback AudioContext on mobile.
+    // NOTE: do NOT connect capture to destination — it only posts PCM via port.onmessage
 
+    dbg('Setting up playback worklet...');
     state.playback = await addWorklet(state.playbackCtx, PLAYBACK_WORKLET, 'playback');
     state.playback.connect(state.playbackCtx.destination);
 
     // 3. Connect to AssemblyAI
-    state.aaiWs = new WebSocket(`${CONFIG.VOICE_AGENT_URL}?token=${token}`);
+    const aaiUrl = `${CONFIG.VOICE_AGENT_URL}?token=${token}`;
+    dbg('Connecting AAI WebSocket to: ' + CONFIG.VOICE_AGENT_URL + '?token=***');
+    state.aaiWs = new WebSocket(aaiUrl);
+
+    // AAI connection timeout
+    const aaiTimeout = setTimeout(() => {
+        if (state.aaiWs && state.aaiWs.readyState !== WebSocket.OPEN) {
+            dbg('ERROR: AAI WebSocket timed out after 10s');
+            updateStatus('Voice connection timed out');
+            state.voiceConnecting = false;
+        }
+    }, 10000);
 
     capture.port.onmessage = ({ data }) => {
         if (!state.aaiReady || state.aaiWs?.readyState !== 1) return;
@@ -302,7 +421,8 @@ async function connectToAssemblyAI() {
     };
 
     state.aaiWs.onopen = () => {
-        console.log('AAI connected, sending session.update');
+        clearTimeout(aaiTimeout);
+        dbg('AAI WebSocket OPENED ✓ — sending session.update');
 
         const ocrName = state.ocrData?.name || '';
         const ocrFields = state.ocrData ? Object.entries(state.ocrData).filter(([k, v]) => v && k !== 'name').map(([k, v]) => `${k}: ${v}`).join(', ') : '';
@@ -312,6 +432,7 @@ async function connectToAssemblyAI() {
             : '';
 
         const questionsList = (state.questions || []).map((q, i) => `${i + 1}. "${q.text}" (field: ${q.field})`).join('\n');
+        dbg('System prompt questions: ' + questionsList.substring(0, 200));
 
         const systemPrompt = `You are a friendly virtual reception assistant at ${state.businessName || 'this office'}.
 
@@ -335,7 +456,7 @@ RULES:
 - Never generate your own questions
 - Call submit_answer only for confirmed answers`;
 
-        state.aaiWs.send(JSON.stringify({
+        const sessionUpdate = {
             type: 'session.update',
             session: {
                 system_prompt: systemPrompt,
@@ -350,28 +471,42 @@ RULES:
                     parameters: { type: 'object', properties: { answer: { type: 'string' } }, required: ['answer'] },
                 }],
             },
-        }));
+        };
+        dbg('Sending session.update (prompt length=' + systemPrompt.length + ')');
+        state.aaiWs.send(JSON.stringify(sessionUpdate));
+        dbg('session.update sent ✓ — waiting for session.ready');
     };
 
-    state.aaiWs.onmessage = ({ data }) => handleAAILogic(JSON.parse(data));
+    state.aaiWs.onmessage = ({ data }) => {
+        try {
+            handleAAILogic(JSON.parse(data));
+        } catch (err) {
+            dbg('ERROR parsing AAI message: ' + err.message);
+        }
+    };
+
     state.aaiWs.onerror = (err) => {
-        console.error('AAI WebSocket error:', err);
+        clearTimeout(aaiTimeout);
+        dbg('AAI WebSocket ERROR');
         updateStatus('Voice connection error');
         state.voiceConnecting = false;
     };
+
     state.aaiWs.onclose = (ev) => {
-        console.log('AAI WebSocket closed, code:', ev.code, 'reason:', ev.reason);
+        clearTimeout(aaiTimeout);
+        dbg('AAI WebSocket CLOSED code=' + ev.code + ' reason=' + (ev.reason || '(none)'));
         state.aaiReady = false;
         state.voiceConnecting = false;
         state.aaiWs = null;
-        if (ev.code !== 1000) updateStatus('Voice disconnected — ' + (ev.reason || 'closed'));
+        if (ev.code !== 1000) updateStatus('Voice disconnected — ' + (ev.reason || 'code ' + ev.code));
     };
 }
 
 function handleAAILogic(msg) {
-    console.log('AAI ←', msg.type, msg);
+    dbg('AAI ← ' + msg.type);
     switch (msg.type) {
         case 'session.ready':
+            dbg('session.ready — VOICE IS LIVE ✓');
             state.aaiReady = true;
             state.voiceConnecting = false;
             updateStatus('Listening...');
@@ -394,17 +529,18 @@ function handleAAILogic(msg) {
         case 'transcript.user': addMessage('user', msg.text); break;
         case 'transcript.agent': addMessage('agent', msg.text); break;
         case 'session.ended': state.aaiReady = false; break;
-        case 'session.error': updateStatus('Voice error: ' + msg.message); break;
+        case 'session.error': dbg('AAI session.error: ' + msg.message); updateStatus('Voice error: ' + msg.message); break;
 
         case 'tool.call':
             if (msg.name === 'submit_answer') {
                 const answer = msg.arguments?.answer || '';
+                dbg('Tool call submit_answer: ' + answer);
                 if (state.doWs?.readyState === 1) state.doWs.send(JSON.stringify({ type: 'user_transcript', text: answer }));
                 if (state.aaiWs?.readyState === 1) state.aaiWs.send(JSON.stringify({ type: 'tool.result', call_id: msg.call_id, result: JSON.stringify({ success: true }) }));
             }
             break;
         default:
-            console.log('Unhandled AAI message type:', msg.type, msg);
+            dbg('Unhandled AAI message: ' + msg.type + ' ' + JSON.stringify(msg).substring(0, 200));
             break;
     }
 }

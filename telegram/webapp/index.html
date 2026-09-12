@@ -26,8 +26,8 @@
                 <h1 id="header-title">Welcome</h1>
             </div>
             <div class="status" id="status">
-                <span class="status-dot"></span>
-                <span class="status-text">Connecting...</span>
+                <span class="status-dot" id="status-dot"></span>
+                <span class="status-text" id="status-text">Connecting...</span>
             </div>
         </div>
     </header>
@@ -124,6 +124,8 @@
 
     <footer class="footer">
         <p>Powered by <strong>AssemblyAI</strong> Voice Agent API</p>
+        <div id="debug-log" style="margin-top:12px;padding:8px;background:#111;color:#0f0;font:11px monospace;max-height:180px;overflow-y:auto;border-radius:6px;text-align:left;word-break:break-all;white-space:pre-wrap;display:none;"></div>
+        <button onclick="document.getElementById('debug-log').style.display='block';this.style.display='none'" style="margin-top:6px;font-size:10px;opacity:0.4;border:none;background:none;color:#999;cursor:pointer;">Show Debug Log</button>
     </footer>
 
     <script>
