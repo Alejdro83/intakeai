@@ -216,6 +216,7 @@ function handleDOMessage(msg) {
             showStep('voice');
             // Store that we have OCR data to send when voice is ready
             state.pendingOcrData = state.ocrData && Object.keys(state.ocrData).length > 0;
+            dbg('pendingOcrData=' + state.pendingOcrData + ' aaiReady=' + state.aaiReady + ' voiceConnecting=' + state.voiceConnecting);
             // If voice is already connected, send OCR data now
             if (state.aaiReady && state.pendingOcrData) {
                 dbg('Voice already connected, sending OCR data via session.update');
@@ -256,12 +257,14 @@ RULES:
                         }],
                     },
                 }));
-            } else if (!state.aaiReady) {
-                dbg('Voice not connected yet, connecting now');
+            } else if (!state.aaiReady && !state.voiceConnecting) {
+                dbg('Voice not connected and not connecting — starting now');
                 connectToAssemblyAI().catch(err => {
                     dbg('Voice failed: ' + err.message);
                     updateStatus('Voice failed: ' + err.message);
                 });
+            } else if (state.voiceConnecting) {
+                dbg('Voice is connecting — OCR data will be sent on session.ready');
             } else {
                 dbg('No OCR data, voice already connected — agent will proceed with questions');
             }
