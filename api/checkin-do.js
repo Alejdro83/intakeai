@@ -142,33 +142,37 @@ export class CheckinSession {
 
     // Attempt OCR — if anything fails, continue WITHOUT OCR (non-fatal)
     let ocrOk = false;
-    if (this.env.AI) {
-      try {
-        const obj = await this.env.R2_DOCS.get(r2Key);
-        if (obj) {
-          const arrayBuffer = await obj.arrayBuffer();
-          const base64 = btoa(String.fromCharCode(...new Uint8Array(arrayBuffer)));
-
-          const result = await this.env.AI.run("@cf/meta/llama-3.2-11b-vision", {
-            image: base64,
-            prompt:
-              "Extract the following fields from this document in JSON format: " +
-              '{"name": "", "id_number": "", "date_of_birth": "", "address": ""}. ' +
-              "Return only valid JSON, no explanation.",
-          });
-
-          const text = typeof result === "string" ? result : result?.response || "";
-          const jsonMatch = text.match(/\{[\s\S]*\}/);
-          if (jsonMatch) {
-            this.session.ocrData = JSON.parse(jsonMatch[0]);
-            ocrOk = true;
-          }
-        } else {
-          console.error("R2 object not found:", r2Key);
+    try {
+      const obj = await this.env.R2_DOCS.get(r2Key);
+      if (obj && this.env.AI) {
+        const arrayBuffer = await obj.arrayBuffer();
+        // Safe base64 encoding (avoids call stack overflow for large images)
+        const bytes = new Uint8Array(arrayBuffer);
+        let binary = "";
+        for (let i = 0; i < bytes.length; i += 8192) {
+          binary += String.fromCharCode.apply(null, bytes.subarray(i, i + 8192));
         }
-      } catch (err) {
-        console.error("OCR error (non-fatal):", err);
+        const base64 = btoa(binary);
+
+        const result = await this.env.AI.run("@cf/meta/llama-3.2-11b-vision", {
+          image: base64,
+          prompt:
+            "Extract the following fields from this document in JSON format: " +
+            '{"name": "", "id_number": "", "date_of_birth": "", "address": ""}. ' +
+            "Return only valid JSON, no explanation.",
+        });
+
+        const text = typeof result === "string" ? result : result?.response || "";
+        const jsonMatch = text.match(/\{[\s\S]*\}/);
+        if (jsonMatch) {
+          this.session.ocrData = JSON.parse(jsonMatch[0]);
+          ocrOk = true;
+        }
+      } else if (!obj) {
+        console.error("R2 object not found:", r2Key);
       }
+    } catch (err) {
+      console.error("OCR error (non-fatal):", err);
     }
 
     // Send OCR result (even if empty — frontend shows what was extracted)
