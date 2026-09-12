@@ -6,6 +6,12 @@ compatibility_flags = ["nodejs_compat"]
 [placement]
 mode = "smart"
 
+# Comma-separated Telegram user IDs allowed to use admin.html's write endpoints.
+# Not sensitive (just numeric Telegram IDs), safe as a plain var. Keep in sync
+# with the ADMIN_IDS array in telegram/webapp/admin.html.
+[vars]
+ADMIN_TELEGRAM_IDS = "6438086899"
+
 # D1 Database
 [[d1_databases]]
 binding = "DB"

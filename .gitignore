@@ -3,3 +3,4 @@ node_modules/
 agents/*.env
 .wrangler/
 __pycache__/
+.dev.vars

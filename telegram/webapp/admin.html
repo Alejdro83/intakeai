@@ -446,6 +446,12 @@
         <div id="view-submissions" class="hidden">
             <div class="card">
                 <h2>📊 Registered Visitors</h2>
+                <div class="form-group">
+                    <label>Business</label>
+                    <select id="submissions-biz-select" onchange="selectedBizId = this.value || null; loadSubmissions();">
+                        <option value="">Select a business...</option>
+                    </select>
+                </div>
                 <div id="submissions-content">
                     <div class="empty-state">Select a business first to view its submissions.</div>
                 </div>
@@ -459,6 +465,10 @@
     <script src="https://telegram.org/js/telegram-web-app.js"></script>
     <script>
         // ── Admin Auth: validate Telegram initData ──
+        // This client-side check is only a fast UX gate (it reads unsafe/spoofable
+        // data) — the real enforcement is server-side in api/worker.js's
+        // requireAdmin(), which HMAC-verifies initData against ADMIN_TELEGRAM_IDS.
+        // Keep this list in sync with wrangler.toml's ADMIN_TELEGRAM_IDS var.
         const tg = window.Telegram?.WebApp;
         if (tg) tg.ready();
 
@@ -494,6 +504,13 @@
 
         const API = 'https://virtualobby-api.alejdro.workers.dev';
         const BOT_USERNAME = 'Virtu_intake_bot';
+
+        // Sent on every mutating/PII-reading call so the Worker can verify it
+        // server-side (see requireAdmin in api/worker.js) — the client-side
+        // gate above can be spoofed by anyone with devtools, this can't.
+        function authHeaders(extra = {}) {
+            return initData ? { 'X-Telegram-Init-Data': initData, ...extra } : extra;
+        }
         
         const TEMPLATES = {
             clinic: {
@@ -619,8 +636,19 @@
                     </div>
                 `;
             }).join('');
+
+            renderSubmissionsBizSelect();
         }
-        
+
+        function renderSubmissionsBizSelect() {
+            const sel = document.getElementById('submissions-biz-select');
+            if (!sel) return;
+            const current = sel.value;
+            sel.innerHTML = '<option value="">Select a business...</option>' +
+                businesses.map(b => `<option value="${b.id}">${b.name || b.id}</option>`).join('');
+            sel.value = selectedBizId || current || '';
+        }
+
         async function selectBusiness(id) {
             selectedBizId = id;
             const biz = businesses.find(b => b.id === id);
@@ -698,33 +726,36 @@
             };
             
             try {
-                await fetch(`${API}/api/businesses/${selectedBizId}`, {
+                const res1 = await fetch(`${API}/api/businesses/${selectedBizId}`, {
                     method: 'PUT',
-                    headers: { 'Content-Type': 'application/json' },
+                    headers: authHeaders({ 'Content-Type': 'application/json' }),
                     body: JSON.stringify(biz),
                 });
-                
-                // Also save questions separately
-                await fetch(`${API}/api/businesses/${selectedBizId}/questions`, {
+                if (!res1.ok) throw new Error('Save business failed: ' + res1.status);
+
+                // Also save questions separately (bulk replace)
+                const res2 = await fetch(`${API}/api/businesses/${selectedBizId}/questions`, {
                     method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
+                    headers: authHeaders({ 'Content-Type': 'application/json' }),
                     body: JSON.stringify({ questions: detailQuestions }),
                 });
-                
+                if (!res2.ok) throw new Error('Save questions failed: ' + res2.status);
+
                 toast('✅ Business saved!');
                 loadBusinesses();
             } catch (err) {
                 console.error('Save error:', err);
-                toast('❌ Failed to save');
+                toast('❌ Failed to save: ' + err.message);
             }
         }
-        
+
         async function deleteBusiness() {
             if (!selectedBizId) return;
             if (!confirm('Delete this business? This cannot be undone.')) return;
-            
+
             try {
-                await fetch(`${API}/api/businesses/${selectedBizId}`, { method: 'DELETE' });
+                const res = await fetch(`${API}/api/businesses/${selectedBizId}`, { method: 'DELETE', headers: authHeaders() });
+                if (!res.ok) throw new Error('HTTP ' + res.status);
                 selectedBizId = null;
                 document.getElementById('biz-detail').classList.add('hidden');
                 toast('🗑️ Business deleted');
@@ -794,7 +825,7 @@
             try {
                 const res = await fetch(API + '/api/businesses', {
                     method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
+                    headers: authHeaders({ 'Content-Type': 'application/json' }),
                     body: JSON.stringify(biz),
                 });
                 
@@ -873,35 +904,40 @@
         // ── Submissions ───────────────────────────────────────────
         
         async function loadSubmissions() {
+            renderSubmissionsBizSelect();
             const content = document.getElementById('submissions-content');
+
+            if (!selectedBizId) {
+                content.innerHTML = '<div class="empty-state">Select a business first to view its submissions.</div>';
+                return;
+            }
+
             content.innerHTML = '<div style="text-align:center;padding:20px;"><span class="spinner"></span></div>';
-            
+
             try {
-                let url = API + '/api/submissions';
-                if (selectedBizId) url += `?business_id=${selectedBizId}`;
-                
-                const res = await fetch(url);
+                const res = await fetch(`${API}/api/businesses/${selectedBizId}/registrations`, { headers: authHeaders() });
+                if (!res.ok) throw new Error('HTTP ' + res.status);
                 const data = await res.json();
-                const subs = data.submissions || data || [];
-                
+                const subs = data.registrations || [];
+
                 if (!subs.length) {
                     content.innerHTML = '<div class="empty-state">No visitors yet. Share your QR code to get started!</div>';
                     return;
                 }
-                
-                let html = '<table class="sub-table"><tr><th>Name</th><th>ID Number</th><th>Business</th><th>Time</th></tr>';
+
+                let html = '<table class="sub-table"><tr><th>Name</th><th>ID Number</th><th>Status</th><th>Time</th></tr>';
                 subs.forEach(s => {
                     html += `<tr>
-                        <td>${s.visitor?.full_name || s.full_name || 'N/A'}</td>
-                        <td>${s.visitor?.id_number || s.id_number || 'N/A'}</td>
-                        <td>${s.business_id || 'N/A'}</td>
-                        <td>${new Date(s.timestamp || s.created).toLocaleString()}</td>
+                        <td>${s.ocr?.name || '—'}</td>
+                        <td>${s.ocr?.id_number || '—'}</td>
+                        <td>${s.status || 'completed'}</td>
+                        <td>${new Date(s.created_at).toLocaleString()}</td>
                     </tr>`;
                 });
                 html += '</table>';
                 content.innerHTML = html;
             } catch (err) {
-                content.innerHTML = '<div class="empty-state">Failed to load submissions.</div>';
+                content.innerHTML = '<div class="empty-state">Failed to load submissions: ' + err.message + '</div>';
             }
         }
         

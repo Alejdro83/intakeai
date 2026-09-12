@@ -67,10 +67,10 @@ const PLAYBACK_WORKLET = `
 // ── State ──────────────────────────────────────────────────────────────────
 
 const state = {
-    businessId: null, businessName: '', doWs: null, aaiWs: null,
+    businessId: null, businessName: '', sessionId: null, doWs: null, aaiWs: null,
     captureCtx: null, playbackCtx: null, playback: null, mic: null,
     aaiReady: false, questions: [], answers: {}, ocrData: null,
-    requiresIdScan: false, voiceConnecting: false,
+    requiresIdScan: false, voiceConnecting: false, pendingToolResults: [],
 };
 
 const $ = (id) => document.getElementById(id) || document.querySelector(`.${id}`);
@@ -127,7 +127,8 @@ async function init() {
 // ── DO WebSocket ───────────────────────────────────────────────────────────
 
 async function connectToDO() {
-    const wsUrl = `${CONFIG.API_URL.replace('https://', 'wss://')}/api/ws/${crypto.randomUUID()}`;
+    state.sessionId = crypto.randomUUID();
+    const wsUrl = `${CONFIG.API_URL.replace('https://', 'wss://')}/api/ws/${state.sessionId}`;
     dbg('DO WS URL: ' + wsUrl);
     state.doWs = new WebSocket(wsUrl);
 
@@ -220,43 +221,8 @@ function handleDOMessage(msg) {
             // If voice is already connected, send OCR data now
             if (state.aaiReady && state.pendingOcrData) {
                 dbg('Voice already connected, sending OCR data via session.update');
-                const ocrName = state.ocrData.name || '';
-                const ocrFields = Object.entries(state.ocrData).filter(([k, v]) => v && k !== 'name').map(([k, v]) => `${k}: ${v}`).join(', ');
-                const questionsList = (state.questions || []).map((q, i) => `${i + 1}. \"${q.text}\" (field: ${q.field})`).join('\n');
-                const updatedPrompt = `You are a friendly virtual reception assistant at ${state.businessName || 'this office'}.
-
-OCR DATA from visitor ID:
-- Name: ${ocrName}${ocrFields ? '\n- ' + ocrFields : ''}
-
-Read back this data and ask \"Is this correct?\" Wait for confirmation.
-
-QUESTIONS (ask ONE AT A TIME, after confirming OCR data):
-${questionsList}
-
-FLOW:
-1. Read OCR data, ask \"Is this correct?\"
-2. After confirmation, ask each question
-3. Call submit_answer after each answer
-4. Summarize at the end
-
-RULES:
-- Speak in the visitor's language
-- Keep sentences short
-- Never generate your own questions`;
-                state.aaiWs.send(JSON.stringify({
-                    type: 'session.update',
-                    session: {
-                        system_prompt: updatedPrompt,
-                        greeting: `I see from your ID that your name is ${ocrName}. Let me confirm your details.`,
-                        output: { type: 'audio', voice: 'anna' },
-                        tools: [{
-                            type: 'function',
-                            name: 'submit_answer',
-                            description: 'Submit the visitor answer for the current question.',
-                            parameters: { type: 'object', properties: { answer: { type: 'string' } }, required: ['answer'] },
-                        }],
-                    },
-                }));
+                state.pendingOcrData = false;
+                sendOcrCatchUpUpdate();
             } else if (!state.aaiReady && !state.voiceConnecting) {
                 dbg('Voice not connected and not connecting — starting now');
                 connectToAssemblyAI().catch(err => {
@@ -296,16 +262,23 @@ async function uploadAndProcess(blobOrFile, contentType) {
     updateStatus('Uploading...');
 
     try {
-        dbg('Fetching upload URL...');
-        const urlResp = await fetch(`${CONFIG.API_URL}/api/upload-url`);
-        if (!urlResp.ok) { const t = await urlResp.text(); throw new Error('Upload URL failed: ' + urlResp.status + ' ' + t); }
-        const { upload_url, r2_key } = await urlResp.json();
-        dbg('Upload URL OK, r2_key=' + r2_key);
+        if (!state.sessionId) throw new Error('No active session');
 
-        dbg('Uploading blob to R2...');
-        const putResp = await fetch(upload_url, { method: 'PUT', headers: { 'Content-Type': contentType || 'image/jpeg' }, body: blobOrFile });
-        if (!putResp.ok) throw new Error('Upload failed: ' + putResp.status);
-        dbg('Upload complete');
+        // Upload goes straight to our DO-scoped endpoint (PUT /api/ws/<sessionId>).
+        // The Durable Object only accepts it while this visitor's session is in the
+        // "scanning_doc" state, so there's no open write proxy to abuse.
+        dbg('Uploading blob to DO-scoped endpoint...');
+        const putResp = await fetch(`${CONFIG.API_URL}/api/ws/${state.sessionId}`, {
+            method: 'PUT',
+            headers: { 'Content-Type': contentType || 'image/jpeg' },
+            body: blobOrFile,
+        });
+        if (!putResp.ok) {
+            const t = await putResp.text().catch(() => '');
+            throw new Error('Upload failed: ' + putResp.status + ' ' + t);
+        }
+        const { r2_key } = await putResp.json();
+        dbg('Upload complete, r2_key=' + r2_key);
 
         if (state.doWs?.readyState !== 1) {
             dbg('DO NOT READY: readyState=' + (state.doWs?.readyState || 'null'));
@@ -473,10 +446,10 @@ RULES:
             type: 'session.update',
             session: {
                 system_prompt: systemPrompt,
-                greeting: needsScan
+                greeting: state.requiresIdScan
                     ? `Hello! Welcome to ${state.businessName || 'our office'}. My name is Anna and I'll be your virtual reception assistant today. Please upload your ID document using the button on screen.`
                     : `Hello! Welcome to ${state.businessName || 'our office'}. My name is Anna and I'll be your virtual reception assistant today. Let's get you checked in.`,
-                output: { type: 'audio', voice: 'anna' },
+                output: { voice: 'anna' },
                 tools: [
                     {
                         type: 'function',
@@ -484,7 +457,7 @@ RULES:
                         description: 'Submit the visitor answer for the current question.',
                         parameters: { type: 'object', properties: { answer: { type: 'string' } }, required: ['answer'] },
                     },
-                    ...(needsScan ? [{
+                    ...(state.requiresIdScan ? [{
                         type: 'function',
                         name: 'submit_ocr_data',
                         description: 'Submit the OCR data extracted from the visitor ID document.',
@@ -533,46 +506,8 @@ function handleAAILogic(msg) {
             updateStatus('Listening...');
             // If we have pending OCR data, send it now
             if (state.pendingOcrData && state.ocrData && Object.keys(state.ocrData).length > 0) {
-                dbg('Sending pending OCR data via session.update');
                 state.pendingOcrData = false;
-                const ocrName = state.ocrData.name || '';
-                const ocrFields = Object.entries(state.ocrData).filter(([k, v]) => v && k !== 'name').map(([k, v]) => `${k}: ${v}`).join(', ');
-                const questionsList = (state.questions || []).map((q, i) => `${i + 1}. \"${q.text}\" (field: ${q.field})`).join('\n');
-                const updatedPrompt = `You are a friendly virtual reception assistant at ${state.businessName || 'this office'}.
-
-OCR DATA from visitor ID:
-- Name: ${ocrName}${ocrFields ? '\n- ' + ocrFields : ''}
-
-Read back this data and ask \"Is this correct?\" Wait for confirmation.
-
-QUESTIONS (ask ONE AT A TIME, after confirming OCR data):
-${questionsList}
-
-FLOW:
-1. Read OCR data, ask \"Is this correct?\"
-2. After confirmation, ask each question
-3. Call submit_answer after each answer
-4. Summarize at the end
-
-RULES:
-- Speak in the visitor's language
-- Keep sentences short
-- Never generate your own questions`;
-                state.aaiWs.send(JSON.stringify({
-                    type: 'session.update',
-                    session: {
-                        system_prompt: updatedPrompt,
-                        greeting: `I see from your ID that your name is ${ocrName}. Let me confirm your details.`,
-                        output: { type: 'audio', voice: 'anna' },
-                        tools: [{
-                            type: 'function',
-                            name: 'submit_answer',
-                            description: 'Submit the visitor answer for the current question.',
-                            parameters: { type: 'object', properties: { answer: { type: 'string' } }, required: ['answer'] },
-                        }],
-                    },
-                }));
-                dbg('Pending OCR data sent ✓');
+                sendOcrCatchUpUpdate();
             }
             break;
 
@@ -589,24 +524,109 @@ RULES:
         }
 
         case 'reply.started': updateStatus('Speaking...'); break;
-        case 'reply.done': updateStatus('Listening...'); if (msg.status === 'interrupted') state.playback?.port.postMessage('stop'); break;
+        case 'reply.done':
+            updateStatus('Listening...');
+            if (msg.status === 'interrupted') {
+                // Per AssemblyAI docs: discard any tool.result queued during a reply
+                // that got cut short — the turn it belonged to no longer exists.
+                state.playback?.port.postMessage('stop');
+                state.pendingToolResults = [];
+            } else {
+                flushPendingToolResults();
+            }
+            break;
         case 'transcript.user': addMessage('user', msg.text); break;
         case 'transcript.agent': addMessage('agent', msg.text); break;
         case 'session.ended': state.aaiReady = false; break;
         case 'session.error': dbg('AAI session.error: ' + msg.message); updateStatus('Voice error: ' + msg.message); break;
 
         case 'tool.call':
-            if (msg.name === 'submit_answer') {
-                const answer = msg.arguments?.answer || '';
-                dbg('Tool call submit_answer: ' + answer);
-                if (state.doWs?.readyState === 1) state.doWs.send(JSON.stringify({ type: 'user_transcript', text: answer }));
-                if (state.aaiWs?.readyState === 1) state.aaiWs.send(JSON.stringify({ type: 'tool.result', call_id: msg.call_id, result: JSON.stringify({ success: true }) }));
-            }
+            queueToolResult(msg);
             break;
         default:
             dbg('Unhandled AAI message: ' + msg.type + ' ' + JSON.stringify(msg).substring(0, 200));
             break;
     }
+}
+
+// ── Tool calls ─────────────────────────────────────────────────────────────
+// Per AssemblyAI docs, tool.result must be sent only once reply.done is the
+// latest event received (never immediately on tool.call) — so we queue here
+// and flush from the reply.done handler in handleAAILogic.
+
+function queueToolResult(msg) {
+    if (msg.name === 'submit_answer') {
+        const answer = msg.arguments?.answer || '';
+        dbg('Tool call queued submit_answer: ' + answer);
+        if (state.doWs?.readyState === 1) state.doWs.send(JSON.stringify({ type: 'user_transcript', text: answer }));
+        state.pendingToolResults.push({ call_id: msg.call_id, result: JSON.stringify({ success: true }) });
+    } else if (msg.name === 'submit_ocr_data') {
+        // The DO already ran OCR server-side; this call is just the agent
+        // acknowledging the data it was given — nothing to store.
+        dbg('Tool call queued submit_ocr_data: ' + JSON.stringify(msg.arguments));
+        state.pendingToolResults.push({ call_id: msg.call_id, result: JSON.stringify({ success: true }) });
+    } else {
+        dbg('Unhandled tool.call: ' + msg.name);
+        state.pendingToolResults.push({ call_id: msg.call_id, result: JSON.stringify({ success: false, error: 'unknown tool' }) });
+    }
+}
+
+function flushPendingToolResults() {
+    if (!state.pendingToolResults.length) return;
+    for (const tr of state.pendingToolResults) {
+        if (state.aaiWs?.readyState === 1) {
+            state.aaiWs.send(JSON.stringify({ type: 'tool.result', call_id: tr.call_id, result: tr.result }));
+        }
+    }
+    state.pendingToolResults = [];
+}
+
+// ── OCR mid-session catch-up ────────────────────────────────────────────────
+// Used only for the race where voice connects before OCR finishes. `greeting`
+// is immutable once a session is live (AssemblyAI docs), so this updates
+// system_prompt/tools only — the agent picks it up on its next turn.
+
+function buildOcrCatchUpPrompt() {
+    const ocrName = state.ocrData?.name || '';
+    const ocrFields = state.ocrData ? Object.entries(state.ocrData).filter(([k, v]) => v && k !== 'name').map(([k, v]) => `${k}: ${v}`).join(', ') : '';
+    const questionsList = (state.questions || []).map((q, i) => `${i + 1}. "${q.text}" (field: ${q.field})`).join('\n');
+    return `You are a friendly virtual reception assistant at ${state.businessName || 'this office'}.
+
+OCR DATA from visitor ID:
+- Name: ${ocrName}${ocrFields ? '\n- ' + ocrFields : ''}
+
+Read back this data and ask "Is this correct?" Wait for confirmation.
+
+QUESTIONS (ask ONE AT A TIME, after confirming OCR data):
+${questionsList}
+
+FLOW:
+1. Read OCR data, ask "Is this correct?"
+2. After confirmation, ask each question
+3. Call submit_answer after each answer
+4. Summarize at the end
+
+RULES:
+- Speak in the visitor's language
+- Keep sentences short
+- Never generate your own questions`;
+}
+
+function sendOcrCatchUpUpdate() {
+    if (state.aaiWs?.readyState !== 1) return;
+    dbg('Sending OCR catch-up via session.update (system_prompt/tools only)');
+    state.aaiWs.send(JSON.stringify({
+        type: 'session.update',
+        session: {
+            system_prompt: buildOcrCatchUpPrompt(),
+            tools: [{
+                type: 'function',
+                name: 'submit_answer',
+                description: 'Submit the visitor answer for the current question.',
+                parameters: { type: 'object', properties: { answer: { type: 'string' } }, required: ['answer'] },
+            }],
+        },
+    }));
 }
 
 // ── Helpers ────────────────────────────────────────────────────────────────

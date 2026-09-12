@@ -53,7 +53,37 @@ export class CheckinSession {
       this.state.acceptWebSocket(server);
       return new Response(null, { status: 101, webSocket: client });
     }
+    if (request.method === "PUT") {
+      return this._handleUploadRequest(request);
+    }
     return new Response("Expected WebSocket upgrade", { status: 426 });
+  }
+
+  /**
+   * Receives the ID photo directly (PUT /api/ws/<uuid>). Only accepted while
+   * this visitor's own session is waiting for a scan — that's what stops it
+   * from being an open write proxy into R2 for anyone who finds the URL.
+   */
+  async _handleUploadRequest(request) {
+    await this._loadSession();
+    if (this.session.fsmState !== "scanning_doc") {
+      return new Response(
+        JSON.stringify({ error: "Not expecting a document upload right now (state=" + this.session.fsmState + ")" }),
+        { status: 409, headers: { "Content-Type": "application/json" } }
+      );
+    }
+    const contentType = request.headers.get("Content-Type") || "image/jpeg";
+    const key = `ids/${this.session.businessId || "unknown"}/${crypto.randomUUID()}.jpg`;
+    try {
+      await this.env.R2_DOCS.put(key, request.body, { httpMetadata: { contentType } });
+    } catch (err) {
+      return new Response(JSON.stringify({ error: `Upload failed: ${err.message}` }), {
+        status: 500, headers: { "Content-Type": "application/json" },
+      });
+    }
+    return new Response(JSON.stringify({ ok: true, r2_key: key }), {
+      headers: { "Content-Type": "application/json" },
+    });
   }
 
   async webSocketOpen(ws) {
@@ -142,6 +172,7 @@ export class CheckinSession {
     } else {
       this.session.fsmState = "asking_questions";
       this._sendQuestionsReady(ws);
+      this._sendCurrentQuestion(ws);
     }
 
     await this._saveSession();
@@ -162,11 +193,68 @@ export class CheckinSession {
 
     this.session.idImageR2Key = r2Key;
 
-    // Send ocr_result (empty for now) and questions_ready immediately
-    this._send(ws, { type: "ocr_result", fields: {}, success: false });
+    let fields = {};
+    let success = false;
+    try {
+      fields = await this._runOcr(r2Key);
+      success = Object.keys(fields).length > 0;
+    } catch (err) {
+      console.error("OCR failed:", err);
+    }
+    this.session.ocrData = fields;
+
+    this._send(ws, { type: "ocr_result", fields, success });
     this.session.fsmState = "asking_questions";
     this._sendQuestionsReady(ws);
+    this._sendCurrentQuestion(ws);
     await this._saveSession();
+  }
+
+  /**
+   * Runs the ID photo through Workers AI vision to pull structured fields.
+   * https://developers.cloudflare.com/workers-ai/models/llama-3.2-11b-vision-instruct/
+   */
+  async _runOcr(r2Key) {
+    const obj = await this.env.R2_DOCS.get(r2Key);
+    if (!obj) throw new Error("Image not found in R2: " + r2Key);
+    const bytes = new Uint8Array(await obj.arrayBuffer());
+
+    const prompt =
+      "You are looking at a photo of an identity document (ID card, passport, or driver's " +
+      "license). Extract these fields if they are visible: full name, id_number (the " +
+      "document/ID number), date_of_birth (YYYY-MM-DD if you can tell), address. " +
+      "Reply with ONLY a compact JSON object and nothing else — no prose, no markdown " +
+      'fences — using exactly these keys: {"name": "", "id_number": "", "date_of_birth": "", ' +
+      '"address": ""}. Use an empty string for any field you cannot read.';
+
+    const result = await this.env.AI.run("@cf/meta/llama-3.2-11b-vision-instruct", {
+      image: Array.from(bytes),
+      prompt,
+      max_tokens: 512,
+    });
+
+    const raw = (result && (result.response || result.description || result.result || result.text)) || "";
+    return this._parseOcrJson(raw);
+  }
+
+  _parseOcrJson(raw) {
+    if (!raw) return {};
+    let text = String(raw).trim();
+    const fenced = text.match(/```(?:json)?\s*([\s\S]*?)```/i);
+    if (fenced) text = fenced[1].trim();
+    const braceMatch = text.match(/\{[\s\S]*\}/);
+    if (braceMatch) text = braceMatch[0];
+    try {
+      const parsed = JSON.parse(text);
+      const out = {};
+      for (const key of ["name", "id_number", "date_of_birth", "address"]) {
+        if (parsed[key]) out[key] = String(parsed[key]).trim();
+      }
+      return out;
+    } catch (err) {
+      console.error("Failed to parse OCR JSON:", err, "raw:", text);
+      return {};
+    }
   }
 
   /* ------------------------------------------------------------------ */

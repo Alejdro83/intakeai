@@ -7,8 +7,8 @@ import { CheckinSession } from './checkin-do.js';
 
 const CORS = {
   'Access-Control-Allow-Origin': '*',
-  'Access-Control-Allow-Methods': 'GET, POST, PUT, OPTIONS',
-  'Access-Control-Allow-Headers': 'Content-Type',
+  'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
+  'Access-Control-Allow-Headers': 'Content-Type, X-Telegram-Init-Data',
 };
 
 function jsonResponse(data, status = 200) {
@@ -16,6 +16,68 @@ function jsonResponse(data, status = 200) {
     status,
     headers: { 'Content-Type': 'application/json', ...CORS },
   });
+}
+
+function safeJsonParse(str) {
+  try { return JSON.parse(str || '{}'); } catch { return {}; }
+}
+
+// ── Telegram initData verification ───────────────────────────────────────
+// https://core.telegram.org/bots/webapps#validating-data-received-via-the-mini-app
+
+async function hmacSha256(keyBytes, msgBytes) {
+  const key = await crypto.subtle.importKey('raw', keyBytes, { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
+  const sig = await crypto.subtle.sign('HMAC', key, msgBytes);
+  return new Uint8Array(sig);
+}
+
+function toHex(bytes) {
+  return Array.from(bytes).map((b) => b.toString(16).padStart(2, '0')).join('');
+}
+
+// Verifies the HMAC and freshness of Telegram.WebApp.initData. Returns the
+// parsed { user, authDate } on success, or null if it's missing/invalid/spoofed.
+async function verifyTelegramInitData(initData, botToken, maxAgeSeconds = 86400) {
+  if (!initData || !botToken) return null;
+  const params = new URLSearchParams(initData);
+  const hash = params.get('hash');
+  if (!hash) return null;
+  params.delete('hash');
+
+  const pairs = [];
+  for (const [k, v] of params.entries()) pairs.push(`${k}=${v}`);
+  pairs.sort();
+  const dataCheckString = pairs.join('\n');
+
+  const enc = new TextEncoder();
+  const secretKey = await hmacSha256(enc.encode('WebAppData'), enc.encode(botToken));
+  const computed = await hmacSha256(secretKey, enc.encode(dataCheckString));
+
+  if (toHex(computed) !== hash) return null;
+
+  const authDate = Number(params.get('auth_date') || '0');
+  if (!authDate || Date.now() / 1000 - authDate > maxAgeSeconds) return null;
+
+  let user = null;
+  try { user = JSON.parse(params.get('user') || 'null'); } catch { user = null; }
+  return { user, authDate };
+}
+
+// Enforces that the request comes from a Telegram user in ADMIN_TELEGRAM_IDS.
+// The client sends initData verbatim in the X-Telegram-Init-Data header —
+// this is the server-side check the client-side gate in admin.html can't do on its own.
+async function requireAdmin(request, env) {
+  const initData = request.headers.get('X-Telegram-Init-Data') || '';
+  const botToken = env.TELEGRAM_BOT_TOKEN;
+  if (!botToken) return { ok: false, status: 500, error: 'Server misconfigured: missing TELEGRAM_BOT_TOKEN' };
+
+  const verified = await verifyTelegramInitData(initData, botToken);
+  if (!verified || !verified.user) return { ok: false, status: 401, error: 'Unauthorized: invalid or missing Telegram session' };
+
+  const adminIds = (env.ADMIN_TELEGRAM_IDS || '').split(',').map((s) => s.trim()).filter(Boolean);
+  if (!adminIds.includes(String(verified.user.id))) return { ok: false, status: 403, error: 'Forbidden: not an admin' };
+
+  return { ok: true, user: verified.user };
 }
 
 // ── Telegram Helpers ──────────────────────────────────────────────────────
@@ -104,43 +166,21 @@ export default {
       return jsonResponse({ session_id: sessionId });
     }
 
-    // ── WebSocket upgrade → Durable Object ──
+    // ── WebSocket upgrade → Durable Object (GET), ID photo upload → Durable
+    //    Object (PUT). Routing the upload through the DO instead of a bare R2
+    //    proxy means it's only accepted while that visitor's own session is
+    //    actually waiting for a scan — no open write endpoint into the bucket.
     const wsMatch = path.match(/^\/api\/ws\/([0-9a-f-]+)$/);
-    if (wsMatch && method === 'GET') {
+    if (wsMatch && (method === 'GET' || method === 'PUT')) {
       const uuid = wsMatch[1];
       const doId = env.CHECKIN_DO.idFromName(uuid);
       const stub = env.CHECKIN_DO.get(doId);
-      return stub.fetch(request);
-    }
+      if (method === 'GET') return stub.fetch(request);
 
-    // ── Presigned R2 upload URL ──
-    if (path === '/api/upload-url' && method === 'GET') {
-      const key = `ids/${crypto.randomUUID()}.jpg`;
-      // R2 presigned URLs: use the S3-compatible interface
-      // For Workers, we return the key and let the client PUT via the worker proxy
-      // or we can generate a signed URL using R2's S3 API
-      try {
-        // Generate presigned URL using R2's public bucket or worker proxy
-        const uploadUrl = `https://${url.hostname}/api/upload/${key}`;
-        return jsonResponse({ upload_url: uploadUrl, r2_key: key });
-      } catch (e) {
-        return jsonResponse({ error: e.message }, 500);
-      }
-    }
-
-    // ── R2 upload proxy (PUT through worker) ──
-    const uploadMatch = path.match(/^\/api\/upload\/(.+)$/);
-    if (uploadMatch && method === 'PUT') {
-      const key = uploadMatch[1];
-      try {
-        const contentType = request.headers.get('Content-Type') || 'image/jpeg';
-        await env.R2_DOCS.put(key, request.body, {
-          httpMetadata: { contentType },
-        });
-        return jsonResponse({ ok: true, key });
-      } catch (e) {
-        return jsonResponse({ error: e.message }, 500);
-      }
+      const doResp = await stub.fetch(request);
+      const headers = new Headers(doResp.headers);
+      for (const [k, v] of Object.entries(CORS)) headers.set(k, v);
+      return new Response(doResp.body, { status: doResp.status, headers });
     }
 
     // ── Businesses: list all ──
@@ -153,7 +193,7 @@ export default {
       }
     }
 
-    // ── Businesses: get questions ──
+    // ── Businesses: get/replace questions ──
     const questionsMatch = path.match(/^\/api\/businesses\/([^/]+)\/questions$/);
     if (questionsMatch) {
       const bizId = questionsMatch[1];
@@ -167,14 +207,40 @@ export default {
           return jsonResponse({ business: biz, questions: results });
         }
         if (method === 'POST') {
+          const auth = await requireAdmin(request, env);
+          if (!auth.ok) return jsonResponse({ error: auth.error }, auth.status);
           const body = await request.json();
+
+          // Bulk replace — this is what admin.html sends: { questions: [...] }
+          if (Array.isArray(body.questions)) {
+            await env.DB.prepare('DELETE FROM business_questions WHERE business_id = ?').bind(bizId).run();
+            let i = 0;
+            for (const q of body.questions) {
+              i++;
+              const text = typeof q === 'string' ? q : (q.text || q.question_text || q.question || '');
+              if (!text) continue;
+              const fieldKey = (typeof q === 'object' && (q.field || q.field_key)) || `q${i}`;
+              const qId = (typeof q === 'object' && q.id) || `q-${bizId}-${i}-${Date.now()}`;
+              await env.DB.prepare(
+                'INSERT INTO business_questions (id, business_id, field_key, question_text, order_index, validation_type) VALUES (?, ?, ?, ?, ?, ?)'
+              ).bind(qId, bizId, fieldKey, text, i, (typeof q === 'object' && q.validation_type) || 'text').run();
+            }
+            return jsonResponse({ ok: true, count: i });
+          }
+
+          // Single insert: { field_key, question_text, order_index, validation_type }
+          if (!body.field_key || !body.question_text) {
+            return jsonResponse({ error: 'Missing field_key or question_text' }, 400);
+          }
           const qId = body.id || `q-${bizId}-${Date.now()}`;
           await env.DB.prepare(
             'INSERT INTO business_questions (id, business_id, field_key, question_text, order_index, validation_type) VALUES (?, ?, ?, ?, ?, ?)'
-          ).bind(qId, bizId, body.field_key, body.question_text, body.order_index, body.validation_type || 'text').run();
+          ).bind(qId, bizId, body.field_key, body.question_text, body.order_index ?? 0, body.validation_type || 'text').run();
           return jsonResponse({ ok: true, id: qId });
         }
         if (method === 'DELETE') {
+          const auth = await requireAdmin(request, env);
+          if (!auth.ok) return jsonResponse({ error: auth.error }, auth.status);
           await env.DB.prepare('DELETE FROM business_questions WHERE business_id = ?').bind(bizId).run();
           return jsonResponse({ ok: true });
         }
@@ -183,14 +249,54 @@ export default {
       }
     }
 
+    // ── Businesses: list registrations (real PII — admin only) ──
+    const registrationsMatch = path.match(/^\/api\/businesses\/([^/]+)\/registrations$/);
+    if (registrationsMatch && method === 'GET') {
+      const auth = await requireAdmin(request, env);
+      if (!auth.ok) return jsonResponse({ error: auth.error }, auth.status);
+      const bizId = registrationsMatch[1];
+      try {
+        const { results } = await env.DB.prepare(
+          'SELECT * FROM guest_registrations WHERE business_id = ? ORDER BY created_at DESC'
+        ).bind(bizId).all();
+        const registrations = (results || []).map((r) => ({
+          ...r,
+          answers: safeJsonParse(r.answers_json),
+          ocr: safeJsonParse(r.ocr_data_json),
+        }));
+        return jsonResponse({ registrations });
+      } catch (e) {
+        return jsonResponse({ error: e.message }, 500);
+      }
+    }
+
     // ── Businesses: create ──
     if (path === '/api/businesses' && method === 'POST') {
+      const auth = await requireAdmin(request, env);
+      if (!auth.ok) return jsonResponse({ error: auth.error }, auth.status);
       try {
         const body = await request.json();
+        if (!body.name) return jsonResponse({ error: 'Missing name' }, 400);
         const id = body.id || body.name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
         await env.DB.prepare(
           'INSERT INTO businesses (id, name, business_type, welcome_message, voice_persona, requires_id_scan) VALUES (?, ?, ?, ?, ?, ?)'
         ).bind(id, body.name, body.business_type, body.welcome_message || 'Welcome!', body.voice_persona || 'anna', body.requires_id_scan ?? 1).run();
+
+        // The admin UI submits template/custom questions inline on create —
+        // these were previously silently dropped (only the business row got saved).
+        const questions = Array.isArray(body.questions) ? body.questions : [];
+        let i = 0;
+        for (const q of questions) {
+          i++;
+          const text = typeof q === 'string' ? q : (q.text || q.question_text || q.question || '');
+          if (!text) continue;
+          const fieldKey = (typeof q === 'object' && (q.field || q.field_key)) || `q${i}`;
+          const qId = `q-${id}-${i}-${Date.now()}`;
+          await env.DB.prepare(
+            'INSERT INTO business_questions (id, business_id, field_key, question_text, order_index, validation_type) VALUES (?, ?, ?, ?, ?, ?)'
+          ).bind(qId, id, fieldKey, text, i, (typeof q === 'object' && q.validation_type) || 'text').run();
+        }
+
         return jsonResponse({ ok: true, id });
       } catch (e) {
         return jsonResponse({ error: e.message }, 500);
@@ -208,6 +314,8 @@ export default {
           return jsonResponse(biz);
         }
         if (method === 'PUT') {
+          const auth = await requireAdmin(request, env);
+          if (!auth.ok) return jsonResponse({ error: auth.error }, auth.status);
           const body = await request.json();
           await env.DB.prepare(
             'UPDATE businesses SET name=?, business_type=?, welcome_message=?, voice_persona=?, requires_id_scan=? WHERE id=?'
@@ -215,6 +323,8 @@ export default {
           return jsonResponse({ ok: true });
         }
         if (method === 'DELETE') {
+          const auth = await requireAdmin(request, env);
+          if (!auth.ok) return jsonResponse({ error: auth.error }, auth.status);
           await env.DB.prepare('DELETE FROM business_questions WHERE business_id = ?').bind(id).run();
           await env.DB.prepare('DELETE FROM businesses WHERE id = ?').bind(id).run();
           return jsonResponse({ ok: true });
