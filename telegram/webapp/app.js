@@ -189,14 +189,19 @@ function handleDOMessage(msg) {
             break;
 
         case 'questions_ready':
+            console.log('Questions ready, OCR data:', state.ocrData);
             state.questions = msg.questions || state.questions;
             state.ocrData = msg.ocr_data || state.ocrData;
             state.businessName = msg.business_name || state.businessName;
             stopCamera();
+            updateStatus('Connecting voice...');
             // Brief delay so user sees OCR result before switching to voice
             setTimeout(() => {
                 showStep('voice');
-                connectToAssemblyAI();
+                connectToAssemblyAI().catch(err => {
+                    console.error('Failed to connect voice:', err);
+                    updateStatus('Voice connection failed');
+                });
             }, 1500);
             break;
 
