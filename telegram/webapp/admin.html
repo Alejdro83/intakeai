@@ -350,11 +350,34 @@
                 </div>
                 
                 <div class="form-group">
-                    <label>Voice Persona</label>
-                    <input type="text" id="detail-persona" placeholder="e.g. friendly receptionist">
-                    <div class="hint">How the AI voice agent should behave</div>
+                    <label>Voice</label>
+                    <select id="detail-voice-id">
+                        <option value="anna">Anna (British English)</option>
+                        <option value="charles">Charles (British English)</option>
+                        <option value="paul">Paul (British English)</option>
+                        <option value="vera">Vera (British English)</option>
+                        <option value="alba">Alba (American English)</option>
+                        <option value="eve">Eve (American English)</option>
+                        <option value="george">George (American English)</option>
+                        <option value="jane">Jane (American English)</option>
+                        <option value="jean">Jean (American English)</option>
+                        <option value="mary">Mary (American English)</option>
+                        <option value="michael">Michael (American English)</option>
+                        <option value="giovanni">Giovanni (Italian)</option>
+                        <option value="lola">Lola (Spanish)</option>
+                        <option value="juergen">Juergen (German)</option>
+                        <option value="rafael">Rafael (Portuguese)</option>
+                        <option value="estelle">Estelle (French)</option>
+                    </select>
+                    <div class="hint">The actual AssemblyAI text-to-speech voice</div>
                 </div>
-                
+
+                <div class="form-group">
+                    <label>Voice Style / Tone</label>
+                    <input type="text" id="detail-persona" placeholder="e.g. warm and reassuring, speaks slowly">
+                    <div class="hint">How the agent should sound and behave — not the voice itself, see "Voice" above</div>
+                </div>
+
                 <div class="toggle-row">
                     <span class="toggle-label">📷 Require ID Scan</span>
                     <div class="toggle" id="toggle-id-scan" onclick="this.classList.toggle('on')"></div>
@@ -417,11 +440,34 @@
                 </div>
                 
                 <div class="form-group">
-                    <label>Voice Persona</label>
-                    <input type="text" id="create-persona" placeholder="e.g. friendly receptionist">
-                    <div class="hint">How the AI voice agent should behave</div>
+                    <label>Voice</label>
+                    <select id="create-voice-id">
+                        <option value="anna">Anna (British English)</option>
+                        <option value="charles">Charles (British English)</option>
+                        <option value="paul">Paul (British English)</option>
+                        <option value="vera">Vera (British English)</option>
+                        <option value="alba">Alba (American English)</option>
+                        <option value="eve">Eve (American English)</option>
+                        <option value="george">George (American English)</option>
+                        <option value="jane">Jane (American English)</option>
+                        <option value="jean">Jean (American English)</option>
+                        <option value="mary">Mary (American English)</option>
+                        <option value="michael">Michael (American English)</option>
+                        <option value="giovanni">Giovanni (Italian)</option>
+                        <option value="lola">Lola (Spanish)</option>
+                        <option value="juergen">Juergen (German)</option>
+                        <option value="rafael">Rafael (Portuguese)</option>
+                        <option value="estelle">Estelle (French)</option>
+                    </select>
+                    <div class="hint">The actual AssemblyAI text-to-speech voice</div>
                 </div>
-                
+
+                <div class="form-group">
+                    <label>Voice Style / Tone</label>
+                    <input type="text" id="create-persona" placeholder="e.g. warm and reassuring, speaks slowly">
+                    <div class="hint">How the agent should sound and behave — not the voice itself, see "Voice" above</div>
+                </div>
+
                 <div class="toggle-row">
                     <span class="toggle-label">📷 Require ID Scan</span>
                     <div class="toggle on" id="create-toggle-id" onclick="this.classList.toggle('on')"></div>
@@ -668,6 +714,7 @@
             document.getElementById('detail-name').value = biz.name || '';
             document.getElementById('detail-type').value = biz.business_type || 'clinic';
             document.getElementById('detail-welcome').value = biz.welcome_message || '';
+            document.getElementById('detail-voice-id').value = biz.voice_id || 'anna';
             document.getElementById('detail-persona').value = biz.voice_persona || '';
             
             const toggle = document.getElementById('toggle-id-scan');
@@ -729,6 +776,7 @@
                 name: document.getElementById('detail-name').value,
                 business_type: document.getElementById('detail-type').value,
                 welcome_message: document.getElementById('detail-welcome').value,
+                voice_id: document.getElementById('detail-voice-id').value,
                 voice_persona: document.getElementById('detail-persona').value,
                 requires_id_scan: document.getElementById('toggle-id-scan').classList.contains('on'),
                 questions: detailQuestions,
@@ -825,7 +873,8 @@
                 name: name,
                 business_type: type,
                 welcome_message: document.getElementById('create-welcome').value || `Welcome to ${name}! Let's get you checked in.`,
-                voice_persona: document.getElementById('create-persona').value || 'friendly receptionist',
+                voice_id: document.getElementById('create-voice-id').value,
+                voice_persona: document.getElementById('create-persona').value,
                 requires_id_scan: document.getElementById('create-toggle-id').classList.contains('on'),
                 questions: createQuestions,
                 created: new Date().toISOString(),
@@ -848,6 +897,7 @@
                     document.getElementById('create-name').value = '';
                     document.getElementById('create-type').value = '';
                     document.getElementById('create-welcome').value = '';
+                    document.getElementById('create-voice-id').value = 'anna';
                     document.getElementById('create-persona').value = '';
                     createQuestions = [];
                     renderCreateQuestions();

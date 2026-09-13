@@ -158,9 +158,13 @@ export class CheckinSession {
 
     this._send(ws, {
       type: "welcome",
-      text: `Welcome to ${bizName}!`,
+      // The configured welcome_message was previously stored but never sent
+      // anywhere — the browser only ever heard a hardcoded "Welcome to X!"
+      // regardless of what was actually set up for the business.
+      welcome_message: this.session.businessConfig?.welcome_message || `Welcome to ${bizName}!`,
       business_name: bizName,
-      voice_persona: this.session.businessConfig?.voice_persona || "anna",
+      voice_id: this.session.businessConfig?.voice_id || "anna",
+      voice_persona: this.session.businessConfig?.voice_persona || "",
       questions: this.session.questions.map(q => ({
         id: q.id, text: q.question_text, type: q.validation_type, field: q.field_key,
       })),

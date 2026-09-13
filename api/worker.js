@@ -3,6 +3,18 @@
 
 import { CheckinSession } from './checkin-do.js';
 
+// Only these are real AssemblyAI TTS voice IDs — never accept arbitrary text
+// here (that's what voice_persona, a separate free-text field, is for).
+// https://www.assemblyai.com/docs/voice-agents/voice-agent-api/voices
+const VALID_VOICE_IDS = [
+  'anna', 'charles', 'paul', 'vera', // British
+  'alba', 'eve', 'george', 'jane', 'jean', 'mary', 'michael', // American
+  'giovanni', 'lola', 'juergen', 'rafael', 'estelle', // language-specific
+];
+function sanitizeVoiceId(id) {
+  return VALID_VOICE_IDS.includes(id) ? id : 'anna';
+}
+
 // ── CORS ──────────────────────────────────────────────────────────────────
 
 const CORS = {
@@ -331,8 +343,8 @@ export default {
         const requestedId = body.id || body.name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
         const id = await uniqueBusinessId(env, requestedId);
         await env.DB.prepare(
-          'INSERT INTO businesses (id, name, business_type, welcome_message, voice_persona, requires_id_scan) VALUES (?, ?, ?, ?, ?, ?)'
-        ).bind(id, body.name, body.business_type, body.welcome_message || 'Welcome!', body.voice_persona || 'anna', body.requires_id_scan ?? 1).run();
+          'INSERT INTO businesses (id, name, business_type, welcome_message, voice_id, voice_persona, requires_id_scan) VALUES (?, ?, ?, ?, ?, ?, ?)'
+        ).bind(id, body.name, body.business_type, body.welcome_message || 'Welcome!', sanitizeVoiceId(body.voice_id), body.voice_persona || '', body.requires_id_scan ?? 1).run();
 
         // The admin UI submits template/custom questions inline on create —
         // these were previously silently dropped (only the business row got saved).
@@ -370,8 +382,8 @@ export default {
           if (!auth.ok) return jsonResponse({ error: auth.error }, auth.status);
           const body = await request.json();
           await env.DB.prepare(
-            'UPDATE businesses SET name=?, business_type=?, welcome_message=?, voice_persona=?, requires_id_scan=? WHERE id=?'
-          ).bind(body.name, body.business_type, body.welcome_message, body.voice_persona, body.requires_id_scan ?? 1, id).run();
+            'UPDATE businesses SET name=?, business_type=?, welcome_message=?, voice_id=?, voice_persona=?, requires_id_scan=? WHERE id=?'
+          ).bind(body.name, body.business_type, body.welcome_message, sanitizeVoiceId(body.voice_id), body.voice_persona || '', body.requires_id_scan ?? 1, id).run();
           return jsonResponse({ ok: true });
         }
         if (method === 'DELETE') {

@@ -91,6 +91,8 @@ const state = {
     // running can't trigger a mid-scan reply that then collides with the
     // interview handoff once OCR finishes.
     micMuted: false,
+    // Per-business voice config, set from the DO's welcome message.
+    welcomeMessage: '', voiceId: 'anna', voicePersona: '',
 };
 
 const $ = (id) => document.getElementById(id) || document.querySelector(`.${id}`);
@@ -213,7 +215,10 @@ function handleDOMessage(msg) {
             state.businessName = msg.business_name || '';
             state.requiresIdScan = msg.requires_id_scan;
             state.questions = msg.questions || [];
-            dbg('Welcome: biz=' + state.businessName + ' requiresIdScan=' + state.requiresIdScan + ' questions=' + state.questions.length);
+            state.welcomeMessage = msg.welcome_message || `Welcome to ${state.businessName}!`;
+            state.voiceId = msg.voice_id || 'anna';
+            state.voicePersona = msg.voice_persona || '';
+            dbg('Welcome: biz=' + state.businessName + ' requiresIdScan=' + state.requiresIdScan + ' questions=' + state.questions.length + ' voiceId=' + state.voiceId);
             const ht = $('header-title');
             if (ht) ht.textContent = `Welcome to ${state.businessName}`;
             updateStatus(`Welcome to ${state.businessName}!`);
@@ -465,20 +470,30 @@ async function connectToAssemblyAI() {
         // OCR finishes. Unmuted again in sendInterviewHandoff.
         state.micMuted = scanPending;
 
+        // The business's configured welcome_message — previously stored in
+        // D1 but never actually sent anywhere; every visitor heard the same
+        // hardcoded "Hello! Welcome to X..." regardless of what was set up.
+        const greetingBase = state.welcomeMessage || `Welcome to ${state.businessName || 'our office'}!`;
+        // output.voice is immutable once the session is live (AssemblyAI
+        // docs), so this initial connect is the only place it can be set —
+        // voiceId must be one of AssemblyAI's own catalog IDs (validated
+        // server-side in worker.js), never the free-text voicePersona.
+        const output = { voice: state.voiceId || 'anna' };
+
         const sessionUpdate = {
             type: 'session.update',
             session: scanPending
                 ? {
                     system_prompt: buildGreetingOnlyPrompt(),
-                    greeting: `Hello! Welcome to ${state.businessName || 'our office'}. My name is Anna and I'll be your virtual reception assistant today. Please upload your ID document using the button on screen.`,
-                    output: { voice: 'anna' },
+                    greeting: `${greetingBase} Please upload your ID document using the button on screen.`,
+                    output,
                     input: { turn_detection: TURN_DETECTION },
                     tools: [],
                 }
                 : {
                     system_prompt: buildInterviewPrompt(),
-                    greeting: `Hello! Welcome to ${state.businessName || 'our office'}. My name is Anna and I'll be your virtual reception assistant today. Let's get you checked in.`,
-                    output: { voice: 'anna' },
+                    greeting: `${greetingBase} Let's get you checked in.`,
+                    output,
                     input: { turn_detection: TURN_DETECTION },
                     tools: buildInterviewTools(),
                 },
@@ -619,9 +634,17 @@ function flushPendingToolResults() {
 // Phase 1 (only used while requires_id_scan is true and OCR hasn't landed
 // yet): announcement-only, no tools, agent stays quiet after the greeting
 // instead of launching into the questionnaire before the visitor has scanned.
+// Free-text tone/style guidance configured per-business (e.g. "warm and
+// reassuring, speaks slowly") — this is what voicePersona is actually for.
+// It cannot select the TTS voice itself (that's voiceId, a validated
+// AssemblyAI catalog ID set once at connect via output.voice).
+function personaLine() {
+    return state.voicePersona ? `\nPERSONALITY: ${state.voicePersona}\n` : '';
+}
+
 function buildGreetingOnlyPrompt() {
     return `You are a friendly virtual reception assistant at ${state.businessName || 'this office'}.
-
+${personaLine()}
 Your only task right now is to greet the visitor and tell them to scan their ID document using the button on screen.
 
 Do NOT ask any interview questions yet — the questionnaire happens later, once the visitor's ID has been scanned. After the greeting, stay quiet and do not speak again on your own.`;
@@ -643,7 +666,7 @@ function buildInterviewPrompt() {
     const questionsList = (state.questions || []).map((q, i) => `${i + 1}. "${q.text}" (field: ${q.field})`).join('\n');
 
     return `You are a friendly virtual reception assistant at ${state.businessName || 'this office'}.
-${ocrSection}
+${personaLine()}${ocrSection}
 
 STEP 2 — QUESTIONS (ask ONE AT A TIME, in order, only after the ID scan is confirmed):
 ${questionsList}
