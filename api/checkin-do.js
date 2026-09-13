@@ -234,7 +234,20 @@ export class CheckinSession {
     });
 
     const raw = (result && (result.response || result.description || result.result || result.text)) || "";
+    // Workers AI sometimes auto-parses a JSON-shaped model reply into an
+    // object (result.response comes back as {name: ..., ...} directly)
+    // instead of the raw string the prompt asked for — pick fields straight
+    // off it in that case rather than stringifying and re-parsing.
+    if (raw && typeof raw === "object") return this._pickOcrFields(raw);
     return this._parseOcrJson(raw);
+  }
+
+  _pickOcrFields(parsed) {
+    const out = {};
+    for (const key of ["name", "id_number", "date_of_birth", "address"]) {
+      if (parsed[key]) out[key] = String(parsed[key]).trim();
+    }
+    return out;
   }
 
   _parseOcrJson(raw) {
@@ -246,11 +259,7 @@ export class CheckinSession {
     if (braceMatch) text = braceMatch[0];
     try {
       const parsed = JSON.parse(text);
-      const out = {};
-      for (const key of ["name", "id_number", "date_of_birth", "address"]) {
-        if (parsed[key]) out[key] = String(parsed[key]).trim();
-      }
-      return out;
+      return this._pickOcrFields(parsed);
     } catch (err) {
       console.error("Failed to parse OCR JSON:", err, "raw:", text);
       return {};
