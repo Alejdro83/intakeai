@@ -1,6 +1,5 @@
 // Virtualobby API — Cloudflare Worker
 // Voice-powered reception agent: D1-backed businesses, R2 uploads, AssemblyAI proxy.
-// (2026-09-13: trivial edit to verify the Workers Builds Git-triggered auto-deploy)
 
 import { CheckinSession } from './checkin-do.js';
 
@@ -21,6 +20,21 @@ function jsonResponse(data, status = 200) {
 
 function safeJsonParse(str) {
   try { return JSON.parse(str || '{}'); } catch { return {}; }
+}
+
+// admin.html derives a business's id by slugifying its name client-side,
+// with no uniqueness check — two businesses with names that slugify the
+// same way (or the same name typed twice) would otherwise hit D1's
+// UNIQUE constraint on businesses.id and fail the whole create. Instead,
+// append -2, -3, ... until a free id is found.
+async function uniqueBusinessId(env, baseId) {
+  let id = baseId;
+  let suffix = 2;
+  while (await env.DB.prepare('SELECT 1 FROM businesses WHERE id = ?').bind(id).first()) {
+    id = `${baseId}-${suffix}`;
+    suffix++;
+  }
+  return id;
 }
 
 // ── Telegram initData verification ───────────────────────────────────────
@@ -278,7 +292,8 @@ export default {
       try {
         const body = await request.json();
         if (!body.name) return jsonResponse({ error: 'Missing name' }, 400);
-        const id = body.id || body.name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+        const requestedId = body.id || body.name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+        const id = await uniqueBusinessId(env, requestedId);
         await env.DB.prepare(
           'INSERT INTO businesses (id, name, business_type, welcome_message, voice_persona, requires_id_scan) VALUES (?, ?, ?, ?, ?, ?)'
         ).bind(id, body.name, body.business_type, body.welcome_message || 'Welcome!', body.voice_persona || 'anna', body.requires_id_scan ?? 1).run();

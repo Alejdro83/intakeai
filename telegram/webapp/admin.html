@@ -830,7 +830,11 @@
                 });
                 
                 if (res.ok) {
-                    toast('✅ Business created!');
+                    // If the name's slug collided with an existing business,
+                    // the Worker appends -2/-3/... — show the actual id used
+                    // so it's not a surprise later when generating its QR code.
+                    const { id: finalId } = await res.json().catch(() => ({}));
+                    toast(finalId && finalId !== id ? `✅ Business created as "${finalId}" (name already in use)` : '✅ Business created!');
                     // Reset form
                     document.getElementById('create-name').value = '';
                     document.getElementById('create-type').value = '';
