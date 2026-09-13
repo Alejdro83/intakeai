@@ -71,6 +71,11 @@ const state = {
     captureCtx: null, playbackCtx: null, playback: null, mic: null,
     aaiReady: false, questions: [], answers: {}, ocrData: null,
     requiresIdScan: false, voiceConnecting: false, pendingToolResults: [],
+    // True once the DO has moved past scanning (questions_ready received),
+    // regardless of whether OCR actually found anything — OCR is best-effort
+    // and empty fields is an expected outcome, not a reason to stay in the
+    // greeting-only phase forever.
+    scanCompleted: false, pendingInterviewHandoff: false,
 };
 
 const $ = (id) => document.getElementById(id) || document.querySelector(`.${id}`);
@@ -215,24 +220,23 @@ function handleDOMessage(msg) {
             state.businessName = msg.business_name || state.businessName;
             dbg('Questions count: ' + state.questions.length + ' ocrData: ' + JSON.stringify(state.ocrData));
             showStep('voice');
-            // Store that we have OCR data to send when voice is ready
-            state.pendingOcrData = state.ocrData && Object.keys(state.ocrData).length > 0;
-            dbg('pendingOcrData=' + state.pendingOcrData + ' aaiReady=' + state.aaiReady + ' voiceConnecting=' + state.voiceConnecting);
-            // If voice is already connected, send OCR data now
-            if (state.aaiReady && state.pendingOcrData) {
-                dbg('Voice already connected, sending OCR data via session.update');
-                state.pendingOcrData = false;
-                sendOcrCatchUpUpdate();
-            } else if (!state.aaiReady && !state.voiceConnecting) {
+            // Scanning is done — move to the interview phase regardless of
+            // whether OCR found anything (empty result is a valid outcome).
+            state.scanCompleted = true;
+            state.pendingInterviewHandoff = true;
+            dbg('scanCompleted=true aaiReady=' + state.aaiReady + ' voiceConnecting=' + state.voiceConnecting);
+            if (state.aaiReady) {
+                dbg('Voice already connected, switching to interview via session.update');
+                state.pendingInterviewHandoff = false;
+                sendInterviewHandoff();
+            } else if (!state.voiceConnecting) {
                 dbg('Voice not connected and not connecting — starting now');
                 connectToAssemblyAI().catch(err => {
                     dbg('Voice failed: ' + err.message);
                     updateStatus('Voice failed: ' + err.message);
                 });
-            } else if (state.voiceConnecting) {
-                dbg('Voice is connecting — OCR data will be sent on session.ready');
             } else {
-                dbg('No OCR data, voice already connected — agent will proceed with questions');
+                dbg('Voice is connecting — interview handoff will happen on session.ready');
             }
             break;
 
@@ -412,9 +416,10 @@ async function connectToAssemblyAI() {
 
         // Two phases: while a scan is still pending, this is announcement-only
         // (greet + tell them to scan, then stay quiet — not an interview yet).
-        // Once OCR data is in (either already, or later via sendOcrCatchUpUpdate),
-        // it switches to the real Q&A prompt/tools.
-        const scanPending = state.requiresIdScan && !(state.ocrData && Object.keys(state.ocrData).length > 0);
+        // Once scanning has completed (regardless of whether OCR found
+        // anything — empty is a valid outcome), it switches to the real
+        // Q&A prompt/tools, either here or later via sendInterviewHandoff.
+        const scanPending = state.requiresIdScan && !state.scanCompleted;
 
         const sessionUpdate = {
             type: 'session.update',
@@ -470,10 +475,12 @@ function handleAAILogic(msg) {
             state.aaiReady = true;
             state.voiceConnecting = false;
             updateStatus('Listening...');
-            // If we have pending OCR data, send it now
-            if (state.pendingOcrData && state.ocrData && Object.keys(state.ocrData).length > 0) {
-                state.pendingOcrData = false;
-                sendOcrCatchUpUpdate();
+            // If scanning finished while voice was still connecting, the
+            // initial session.update (sent on WS open) used the stale
+            // scanPending state — switch to the interview prompt now.
+            if (state.pendingInterviewHandoff) {
+                state.pendingInterviewHandoff = false;
+                sendInterviewHandoff();
             }
             break;
 
@@ -550,7 +557,7 @@ function flushPendingToolResults() {
 // ── Voice prompts ────────────────────────────────────────────────────────
 // Two prompts, one per phase of the conversation. `greeting` is immutable
 // once a session is live (AssemblyAI docs), so the scan→interview handoff
-// (sendOcrCatchUpUpdate) only ever touches system_prompt/tools.
+// (sendInterviewHandoff) only ever touches system_prompt/tools.
 
 // Phase 1 (only used while requires_id_scan is true and OCR hasn't landed
 // yet): announcement-only, no tools, agent stays quiet after the greeting
@@ -564,7 +571,7 @@ Do NOT ask any interview questions yet — the questionnaire happens later, once
 }
 
 // Phase 2: the real check-in interview. Used either from the very start (no
-// scan required) or once OCR data is available (via sendOcrCatchUpUpdate).
+// scan required) or once OCR data is available (via sendInterviewHandoff).
 function buildInterviewPrompt() {
     const ocrName = state.ocrData?.name || '';
     const ocrFields = state.ocrData ? Object.entries(state.ocrData).filter(([k, v]) => v && k !== 'name').map(([k, v]) => `${k}: ${v}`).join(', ') : '';
@@ -602,7 +609,7 @@ function buildInterviewTools() {
     }];
 }
 
-function sendOcrCatchUpUpdate() {
+function sendInterviewHandoff() {
     if (state.aaiWs?.readyState !== 1) return;
     dbg('Sending OCR catch-up via session.update (system_prompt/tools only)');
     state.aaiWs.send(JSON.stringify({
