@@ -487,14 +487,14 @@ async function connectToAssemblyAI() {
                     system_prompt: buildGreetingOnlyPrompt(),
                     greeting: `${greetingBase} Please upload your ID document using the button on screen.`,
                     output,
-                    input: { turn_detection: TURN_DETECTION },
+                    input: { turn_detection: TURN_DETECTION, keyterms: buildKeyterms() },
                     tools: [],
                 }
                 : {
                     system_prompt: buildInterviewPrompt(),
                     greeting: `${greetingBase} Let's get you checked in.`,
                     output,
-                    input: { turn_detection: TURN_DETECTION },
+                    input: { turn_detection: TURN_DETECTION, keyterms: buildKeyterms() },
                     tools: buildInterviewTools(),
                 },
         };
@@ -642,6 +642,20 @@ function personaLine() {
     return state.voicePersona ? `\nPERSONALITY: ${state.voicePersona}\n` : '';
 }
 
+// AssemblyAI docs: session.input.keyterms biases the ASR toward domain
+// vocabulary it would otherwise mishear (business name, field names like
+// "date_of_birth"). Capped at 100 terms / 50 chars each per the API.
+function buildKeyterms() {
+    const terms = [];
+    if (state.businessName) terms.push(state.businessName);
+    for (const q of state.questions || []) {
+        if (!q.field) continue;
+        const readable = String(q.field).replace(/_/g, ' ').trim();
+        if (readable && !terms.includes(readable)) terms.push(readable);
+    }
+    return terms.filter(t => t.length > 0 && t.length <= 50).slice(0, 100);
+}
+
 function buildGreetingOnlyPrompt() {
     return `You are a friendly virtual reception assistant at ${state.businessName || 'this office'}.
 ${personaLine()}
@@ -751,7 +765,7 @@ function sendInterviewHandoff() {
             tools: buildInterviewTools(),
             // Real conversation starts here (mic just unmuted) — this is the
             // point where noise-robust turn detection actually matters most.
-            input: { turn_detection: TURN_DETECTION },
+            input: { turn_detection: TURN_DETECTION, keyterms: buildKeyterms() },
         },
     }));
     // AssemblyAI docs: session.update alone never makes the agent speak — it
