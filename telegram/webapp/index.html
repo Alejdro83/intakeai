@@ -28,10 +28,13 @@
         <!-- Step 1: Scan ID -->
         <section class="step hidden" id="step-scan">
             <div class="step-header"><span class="step-number">1</span><h2>Identity Verification</h2></div>
-            <p class="step-description">First, let's verify your identity.<br>Upload a photo of your ID document.</p>
-            
-            <div class="scan-actions">
-                <label class="btn btn-primary btn-scan-main" for="file-upload">📁 Upload File</label>
+            <p class="step-description">First, let's verify your identity.<br>Take a photo of your ID document, or upload one.</p>
+
+            <div class="scan-actions" id="scan-actions">
+                <label class="btn btn-primary btn-scan-main" for="camera-capture">📷 Take Photo</label>
+                <input type="file" id="camera-capture" accept="image/*" capture="environment" style="display:none;">
+
+                <label class="btn btn-secondary btn-scan-main" for="file-upload">📁 Upload File</label>
                 <input type="file" id="file-upload" accept="image/*" style="display:none;">
             </div>
             

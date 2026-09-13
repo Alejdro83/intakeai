@@ -410,63 +410,29 @@ async function connectToAssemblyAI() {
         clearTimeout(aaiTimeout);
         dbg('AAI WebSocket OPENED ✓ — sending session.update');
 
-        const ocrName = state.ocrData?.name || '';
-        const ocrFields = state.ocrData ? Object.entries(state.ocrData).filter(([k, v]) => v && k !== 'name').map(([k, v]) => `${k}: ${v}`).join(', ') : '';
-
-        const ocrSection = ocrName
-            ? `\nOCR DATA:\n- Name: ${ocrName}${ocrFields ? '\n- ' + ocrFields : ''}\n\nGreet by name, read back data, ask "Is this correct?", wait for confirmation, then proceed with questions.`
-            : '';
-
-        const questionsList = (state.questions || []).map((q, i) => `${i + 1}. "${q.text}" (field: ${q.field})`).join('\n');
-        dbg('System prompt questions: ' + questionsList.substring(0, 200));
-
-        const systemPrompt = `You are a friendly virtual reception assistant at ${state.businessName || 'this office'}.
-
-INTRODUCTION:
-Say: "Hello! Welcome to ${state.businessName || 'our office'}. My name is Anna and I'll be your virtual reception assistant today."
-${ocrSection}
-
-QUESTIONS (ask ONE AT A TIME, in order):
-${questionsList}
-
-FLOW:
-${ocrSection ? '1. Confirm OCR data first' : '1. Start with questions'}
-2. Ask each question, wait for answer, confirm briefly ("Got it", "Understood", "Perfect")
-3. After confirming, call submit_answer tool with their answer
-4. Move to next question
-5. After all questions, summarize and ask "Is everything correct?"
-
-RULES:
-- Speak in the visitor's language
-- Keep sentences short — this is voice
-- Never generate your own questions
-- Call submit_answer only for confirmed answers`;
+        // Two phases: while a scan is still pending, this is announcement-only
+        // (greet + tell them to scan, then stay quiet — not an interview yet).
+        // Once OCR data is in (either already, or later via sendOcrCatchUpUpdate),
+        // it switches to the real Q&A prompt/tools.
+        const scanPending = state.requiresIdScan && !(state.ocrData && Object.keys(state.ocrData).length > 0);
 
         const sessionUpdate = {
             type: 'session.update',
-            session: {
-                system_prompt: systemPrompt,
-                greeting: state.requiresIdScan
-                    ? `Hello! Welcome to ${state.businessName || 'our office'}. My name is Anna and I'll be your virtual reception assistant today. Please upload your ID document using the button on screen.`
-                    : `Hello! Welcome to ${state.businessName || 'our office'}. My name is Anna and I'll be your virtual reception assistant today. Let's get you checked in.`,
-                output: { voice: 'anna' },
-                tools: [
-                    {
-                        type: 'function',
-                        name: 'submit_answer',
-                        description: 'Submit the visitor answer for the current question.',
-                        parameters: { type: 'object', properties: { answer: { type: 'string' } }, required: ['answer'] },
-                    },
-                    ...(state.requiresIdScan ? [{
-                        type: 'function',
-                        name: 'submit_ocr_data',
-                        description: 'Submit the OCR data extracted from the visitor ID document.',
-                        parameters: { type: 'object', properties: { name: { type: 'string' }, id_number: { type: 'string' }, date_of_birth: { type: 'string' }, address: { type: 'string' } }, required: ['name'] },
-                    }] : []),
-                ],
-            },
+            session: scanPending
+                ? {
+                    system_prompt: buildGreetingOnlyPrompt(),
+                    greeting: `Hello! Welcome to ${state.businessName || 'our office'}. My name is Anna and I'll be your virtual reception assistant today. Please upload your ID document using the button on screen.`,
+                    output: { voice: 'anna' },
+                    tools: [],
+                }
+                : {
+                    system_prompt: buildInterviewPrompt(),
+                    greeting: `Hello! Welcome to ${state.businessName || 'our office'}. My name is Anna and I'll be your virtual reception assistant today. Let's get you checked in.`,
+                    output: { voice: 'anna' },
+                    tools: buildInterviewTools(),
+                },
         };
-        dbg('Sending session.update (prompt length=' + systemPrompt.length + ')');
+        dbg('Sending session.update (scanPending=' + scanPending + ')');
         state.aaiWs.send(JSON.stringify(sessionUpdate));
         dbg('session.update sent ✓ — waiting for session.ready');
     };
@@ -581,35 +547,59 @@ function flushPendingToolResults() {
     state.pendingToolResults = [];
 }
 
-// ── OCR mid-session catch-up ────────────────────────────────────────────────
-// Used only for the race where voice connects before OCR finishes. `greeting`
-// is immutable once a session is live (AssemblyAI docs), so this updates
-// system_prompt/tools only — the agent picks it up on its next turn.
+// ── Voice prompts ────────────────────────────────────────────────────────
+// Two prompts, one per phase of the conversation. `greeting` is immutable
+// once a session is live (AssemblyAI docs), so the scan→interview handoff
+// (sendOcrCatchUpUpdate) only ever touches system_prompt/tools.
 
-function buildOcrCatchUpPrompt() {
-    const ocrName = state.ocrData?.name || '';
-    const ocrFields = state.ocrData ? Object.entries(state.ocrData).filter(([k, v]) => v && k !== 'name').map(([k, v]) => `${k}: ${v}`).join(', ') : '';
-    const questionsList = (state.questions || []).map((q, i) => `${i + 1}. "${q.text}" (field: ${q.field})`).join('\n');
+// Phase 1 (only used while requires_id_scan is true and OCR hasn't landed
+// yet): announcement-only, no tools, agent stays quiet after the greeting
+// instead of launching into the questionnaire before the visitor has scanned.
+function buildGreetingOnlyPrompt() {
     return `You are a friendly virtual reception assistant at ${state.businessName || 'this office'}.
 
-OCR DATA from visitor ID:
-- Name: ${ocrName}${ocrFields ? '\n- ' + ocrFields : ''}
+Your only task right now is to greet the visitor and tell them to scan their ID document using the button on screen.
 
-Read back this data and ask "Is this correct?" Wait for confirmation.
+Do NOT ask any interview questions yet — the questionnaire happens later, once the visitor's ID has been scanned. After the greeting, stay quiet and do not speak again on your own.`;
+}
 
-QUESTIONS (ask ONE AT A TIME, after confirming OCR data):
+// Phase 2: the real check-in interview. Used either from the very start (no
+// scan required) or once OCR data is available (via sendOcrCatchUpUpdate).
+function buildInterviewPrompt() {
+    const ocrName = state.ocrData?.name || '';
+    const ocrFields = state.ocrData ? Object.entries(state.ocrData).filter(([k, v]) => v && k !== 'name').map(([k, v]) => `${k}: ${v}`).join(', ') : '';
+    const ocrSection = ocrName
+        ? `\nOCR DATA from visitor ID:\n- Name: ${ocrName}${ocrFields ? '\n- ' + ocrFields : ''}\n\nGreet by name, read back this data and ask "Is this correct?" Wait for confirmation before moving on.`
+        : '';
+    const questionsList = (state.questions || []).map((q, i) => `${i + 1}. "${q.text}" (field: ${q.field})`).join('\n');
+
+    return `You are a friendly virtual reception assistant at ${state.businessName || 'this office'}.
+${ocrSection}
+
+QUESTIONS (ask ONE AT A TIME, in order):
 ${questionsList}
 
 FLOW:
-1. Read OCR data, ask "Is this correct?"
-2. After confirmation, ask each question
-3. Call submit_answer after each answer
-4. Summarize at the end
+${ocrSection ? '1. Confirm OCR data first' : '1. Start with questions'}
+2. Ask each question, wait for answer, confirm briefly ("Got it", "Understood", "Perfect")
+3. After confirming, call submit_answer tool with their answer
+4. Move to next question
+5. After all questions, summarize and ask "Is everything correct?"
 
 RULES:
 - Speak in the visitor's language
-- Keep sentences short
-- Never generate your own questions`;
+- Keep sentences short — this is voice
+- Never generate your own questions
+- Call submit_answer only for confirmed answers`;
+}
+
+function buildInterviewTools() {
+    return [{
+        type: 'function',
+        name: 'submit_answer',
+        description: 'Submit the visitor answer for the current question.',
+        parameters: { type: 'object', properties: { answer: { type: 'string' } }, required: ['answer'] },
+    }];
 }
 
 function sendOcrCatchUpUpdate() {
@@ -618,13 +608,8 @@ function sendOcrCatchUpUpdate() {
     state.aaiWs.send(JSON.stringify({
         type: 'session.update',
         session: {
-            system_prompt: buildOcrCatchUpPrompt(),
-            tools: [{
-                type: 'function',
-                name: 'submit_answer',
-                description: 'Submit the visitor answer for the current question.',
-                parameters: { type: 'object', properties: { answer: { type: 'string' } }, required: ['answer'] },
-            }],
+            system_prompt: buildInterviewPrompt(),
+            tools: buildInterviewTools(),
         },
     }));
 }
@@ -683,10 +668,19 @@ function cleanupAudio() {
 // ── Events ─────────────────────────────────────────────────────────────────
 
 function initEventListeners() {
-    // Single file upload button
+    // Take a photo (capture="environment" opens the device's native camera
+    // app directly — far more reliable inside the Telegram WebView than an
+    // in-page getUserMedia preview, which is why earlier attempts at that
+    // were reverted) or pick an existing one. Both feed the same upload path.
+    $('camera-capture')?.addEventListener('change', (e) => {
+        const file = e.target.files?.[0];
+        if (file) uploadAndProcess(file, file.type);
+        e.target.value = '';
+    });
     $('file-upload')?.addEventListener('change', (e) => {
         const file = e.target.files?.[0];
         if (file) uploadAndProcess(file, file.type);
+        e.target.value = '';
     });
     elements.btnNewVisitor?.addEventListener('click', () => {
         state.answers = {}; state.ocrData = null;
