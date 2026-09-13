@@ -1,5 +1,6 @@
 // Virtualobby API — Cloudflare Worker
 // Voice-powered reception agent: D1-backed businesses, R2 uploads, AssemblyAI proxy.
+// (2026-09-13: trivial edit to verify the Workers Builds Git-triggered auto-deploy)
 
 import { CheckinSession } from './checkin-do.js';
 
