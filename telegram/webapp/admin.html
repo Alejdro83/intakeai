@@ -947,7 +947,7 @@
                     return;
                 }
 
-                let html = '<table class="sub-table"><tr><th>Name</th><th>ID Number</th><th>Answers</th><th>Status</th><th>Time</th></tr>';
+                let html = '<table class="sub-table"><tr><th>Name</th><th>ID Number</th><th>Answers</th><th>Status</th><th>Time</th><th></th></tr>';
                 subs.forEach(s => {
                     const answers = s.answers || {};
                     const answersHtml = Object.entries(answers)
@@ -959,12 +959,25 @@
                         <td style="max-width:320px;">${answersHtml}</td>
                         <td>${s.status || 'completed'}</td>
                         <td>${new Date(s.created_at).toLocaleString()}</td>
+                        <td><button class="btn btn-sm btn-danger" onclick="deleteRegistration('${selectedBizId}', '${s.id}')">🗑️</button></td>
                     </tr>`;
                 });
                 html += '</table>';
                 content.innerHTML = html;
             } catch (err) {
                 content.innerHTML = '<div class="empty-state">Failed to load submissions: ' + err.message + '</div>';
+            }
+        }
+
+        async function deleteRegistration(bizId, regId) {
+            if (!confirm('Delete this visitor registration? This cannot be undone.')) return;
+            try {
+                const res = await fetch(`${API}/api/businesses/${bizId}/registrations/${regId}`, { method: 'DELETE', headers: authHeaders() });
+                if (!res.ok) throw new Error('HTTP ' + res.status);
+                toast('🗑️ Registration deleted');
+                loadSubmissions();
+            } catch (err) {
+                toast('❌ Failed to delete: ' + err.message);
             }
         }
         

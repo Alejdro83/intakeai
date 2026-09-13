@@ -296,6 +296,20 @@ export default {
       }
     }
 
+    // ── Businesses: delete a single registration ──
+    const registrationMatch = path.match(/^\/api\/businesses\/([^/]+)\/registrations\/([^/]+)$/);
+    if (registrationMatch && method === 'DELETE') {
+      const auth = await requireAdmin(request, env);
+      if (!auth.ok) return jsonResponse({ error: auth.error }, auth.status);
+      const [, bizId, regId] = registrationMatch;
+      try {
+        await env.DB.prepare('DELETE FROM guest_registrations WHERE id = ? AND business_id = ?').bind(regId, bizId).run();
+        return jsonResponse({ ok: true });
+      } catch (e) {
+        return jsonResponse({ error: e.message }, 500);
+      }
+    }
+
     // ── Businesses: create ──
     if (path === '/api/businesses' && method === 'POST') {
       const auth = await requireAdmin(request, env);
