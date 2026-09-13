@@ -76,6 +76,12 @@ const state = {
     // and empty fields is an expected outcome, not a reason to stay in the
     // greeting-only phase forever.
     scanCompleted: false, pendingInterviewHandoff: false,
+    // True while a scan is required but not yet confirmed — mic audio is not
+    // forwarded to AssemblyAI during this window (see capture.port.onmessage
+    // in connectToAssemblyAI), so the visitor talking while OCR is still
+    // running can't trigger a mid-scan reply that then collides with the
+    // interview handoff once OCR finishes.
+    micMuted: false,
 };
 
 const $ = (id) => document.getElementById(id) || document.querySelector(`.${id}`);
@@ -244,6 +250,35 @@ function handleDOMessage(msg) {
 
 // ── Upload ─────────────────────────────────────────────────────────────────
 
+const OCR_MAX_DIMENSION = 1600; // px, longest side — plenty for ID-card text legibility
+const OCR_JPEG_QUALITY = 0.85;
+
+// Phone camera photos are often several MB and 3000px+ on a side, which
+// slows both the upload and the vision model's OCR pass (bigger image =
+// more tokens to prefill). Downscale before upload; fall back to the
+// original file untouched if anything in this path fails or isn't supported.
+async function downscaleImage(blobOrFile) {
+    try {
+        const bitmap = await createImageBitmap(blobOrFile, { imageOrientation: 'from-image' });
+        const { width, height } = bitmap;
+        const scale = Math.min(1, OCR_MAX_DIMENSION / Math.max(width, height));
+        if (scale >= 1) { bitmap.close?.(); return blobOrFile; } // already small enough
+        const canvas = document.createElement('canvas');
+        canvas.width = Math.round(width * scale);
+        canvas.height = Math.round(height * scale);
+        canvas.getContext('2d').drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+        bitmap.close?.();
+        const blob = await new Promise((resolve, reject) => {
+            canvas.toBlob((b) => b ? resolve(b) : reject(new Error('canvas.toBlob returned null')), 'image/jpeg', OCR_JPEG_QUALITY);
+        });
+        dbg(`Downscaled image for OCR: ${width}x${height} -> ${canvas.width}x${canvas.height}, ${blob.size} bytes`);
+        return blob;
+    } catch (err) {
+        dbg('Image downscale failed, uploading original: ' + err.message);
+        return blobOrFile;
+    }
+}
+
 async function uploadAndProcess(blobOrFile, contentType) {
     elements.ocrLoading?.classList.remove('hidden');
     updateStatus('Uploading...');
@@ -251,14 +286,17 @@ async function uploadAndProcess(blobOrFile, contentType) {
     try {
         if (!state.sessionId) throw new Error('No active session');
 
+        const uploadBlob = await downscaleImage(blobOrFile);
+        const uploadContentType = uploadBlob === blobOrFile ? (contentType || 'image/jpeg') : 'image/jpeg';
+
         // Upload goes straight to our DO-scoped endpoint (PUT /api/ws/<sessionId>).
         // The Durable Object only accepts it while this visitor's session is in the
         // "scanning_doc" state, so there's no open write proxy to abuse.
         dbg('Uploading blob to DO-scoped endpoint...');
         const putResp = await fetch(`${CONFIG.API_URL}/api/ws/${state.sessionId}`, {
             method: 'PUT',
-            headers: { 'Content-Type': contentType || 'image/jpeg' },
-            body: blobOrFile,
+            headers: { 'Content-Type': uploadContentType },
+            body: uploadBlob,
         });
         if (!putResp.ok) {
             const t = await putResp.text().catch(() => '');
@@ -383,7 +421,7 @@ async function connectToAssemblyAI() {
     }, 10000);
 
     capture.port.onmessage = ({ data }) => {
-        if (!state.aaiReady || state.aaiWs?.readyState !== 1) return;
+        if (!state.aaiReady || state.aaiWs?.readyState !== 1 || state.micMuted) return;
         const bytes = new Uint8Array(data);
         let binary = '';
         for (let i = 0; i < bytes.length; i += 0x8000) binary += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
@@ -400,6 +438,12 @@ async function connectToAssemblyAI() {
         // anything — empty is a valid outcome), it switches to the real
         // Q&A prompt/tools, either here or later via sendInterviewHandoff.
         const scanPending = state.requiresIdScan && !state.scanCompleted;
+        // Mute the outgoing mic entirely while scanning is still pending —
+        // relying on the prompt telling the agent to "stay quiet" isn't
+        // reliable, and letting the visitor's speech through can start a
+        // real exchange that then collides with the interview handoff once
+        // OCR finishes. Unmuted again in sendInterviewHandoff.
+        state.micMuted = scanPending;
 
         const sessionUpdate = {
             type: 'session.update',
@@ -627,6 +671,7 @@ function proceedToInterview() {
 function sendInterviewHandoff() {
     if (state.aaiWs?.readyState !== 1) return;
     dbg('Sending interview handoff via session.update (system_prompt/tools only)');
+    state.micMuted = false; // scan is confirmed — let the mic through again
     state.aaiWs.send(JSON.stringify({
         type: 'session.update',
         session: {
@@ -715,6 +760,11 @@ function initEventListeners() {
     });
     elements.btnNewVisitor?.addEventListener('click', () => {
         state.answers = {}; state.ocrData = null;
+        // Without this reset, a new visitor whose business also requires an
+        // ID scan would skip straight to the interview prompt on connect,
+        // since scanCompleted/requiresIdScan would still carry over true
+        // from the previous visitor's finished session.
+        state.scanCompleted = false; state.pendingInterviewHandoff = false; state.requiresIdScan = false;
         if (elements.transcriptMessages) elements.transcriptMessages.innerHTML = '';
         cleanupAudio(); if (state.doWs) { state.doWs.close(); state.doWs = null; } connectToDO();
     });

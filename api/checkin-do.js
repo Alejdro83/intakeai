@@ -230,7 +230,11 @@ export class CheckinSession {
     const result = await this.env.AI.run("@cf/meta/llama-3.2-11b-vision-instruct", {
       image: Array.from(bytes),
       prompt,
-      max_tokens: 512,
+      // A live test against this model returned the full 4-field JSON in
+      // ~42 completion tokens; 200 leaves comfortable headroom for a long
+      // name/address while cutting the generation budget from the original
+      // 512 — a small but real latency win on top of the client-side resize.
+      max_tokens: 200,
     });
 
     const raw = (result && (result.response || result.description || result.result || result.text)) || "";
