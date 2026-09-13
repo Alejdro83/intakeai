@@ -129,7 +129,13 @@ function addMessage(who, text) {
 function initTelegram() {
     const tg = CONFIG.tgApp; if (!tg) { dbg('No Telegram WebApp object'); return; }
     tg.ready(); tg.expand();
-    const sp = (tg.initDataUnsafe || {}).start_param || '';
+    // Telegram only auto-populates initDataUnsafe.start_param for Direct Link
+    // Mini Apps (t.me/<bot>?startapp=...). This app is instead opened via a
+    // regular `web_app` inline button (see handleTelegramUpdate in
+    // worker.js), which never gets that treatment — the business id has to
+    // be embedded in the button's own URL and read back from location.search.
+    const urlParam = new URLSearchParams(location.search).get('start_param') || '';
+    const sp = urlParam || (tg.initDataUnsafe || {}).start_param || '';
     dbg('start_param: ' + (sp || '(none)'));
     // admin.html's QR/link generator encodes ?start=business_<id> (see
     // getTelegramLink in admin.html) — strip that prefix back off, otherwise

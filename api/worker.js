@@ -115,11 +115,22 @@ async function handleTelegramUpdate(update, env) {
   const token = env.TELEGRAM_BOT_TOKEN;
   const webappUrl = 'https://intakeai-col.pages.dev';
 
-  if (update.message && update.message.text === '/start') {
+  const text = update.message?.text || '';
+  // A deep link like ?start=business_clinic-main makes Telegram send the bot
+  // "/start business_clinic-main", not a bare "/start" — the old exact-match
+  // check ignored every business-specific link. And since the reply always
+  // pointed the button at the same static webappUrl regardless, even fixing
+  // that match wouldn't have been enough: the business id has to actually
+  // travel into the button's URL, since a `web_app` inline button (unlike a
+  // Direct Link Mini App opened via `?startapp=`) never gets Telegram's own
+  // start_param auto-populated in the Mini App's initData.
+  if (text === '/start' || text.startsWith('/start ')) {
     const chatId = update.message.chat.id;
+    const payload = text.slice('/start'.length).trim();
+    const url = payload ? `${webappUrl}/?start_param=${encodeURIComponent(payload)}` : webappUrl;
     await tgSend(token, chatId, '👋 <b>Welcome to Virtualobby!</b>\n\nTap below to open the check-in app.', {
       reply_markup: {
-        inline_keyboard: [[{ text: '🚀 Open Virtualobby', web_app: { url: webappUrl } }]],
+        inline_keyboard: [[{ text: '🚀 Open Virtualobby', web_app: { url } }]],
       },
     });
   }
