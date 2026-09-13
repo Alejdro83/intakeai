@@ -592,7 +592,8 @@
             try {
                 const res = await fetch(API + '/api/businesses');
                 if (res.ok) {
-                    businesses = await res.json();
+                    const data = await res.json();
+                    businesses = data.businesses || data.lobbies || data || [];
                 } else {
                     // Fallback: try /api/lobbies
                     const res2 = await fetch(API + '/api/lobbies');
