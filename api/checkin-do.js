@@ -6,6 +6,15 @@
  * Env bindings: env.DB (D1), env.R2_DOCS (R2), env.AI (Workers AI)
  */
 
+async function computeHmacSha256Hex(secret, message) {
+  const enc = new TextEncoder();
+  const key = await crypto.subtle.importKey(
+    "raw", enc.encode(secret), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]
+  );
+  const sig = await crypto.subtle.sign("HMAC", key, enc.encode(message));
+  return [...new Uint8Array(sig)].map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
 export class CheckinSession {
   constructor(state, env) {
     this.state = state;
@@ -375,6 +384,42 @@ export class CheckinSession {
     this._send(ws, { type: "checkin_complete", registration_id: registrationId });
     await this._saveSession();
 
+    // Fire-and-forget: a business's own CRM/PMS can subscribe to check-ins
+    // without any custom integration. waitUntil keeps the Worker alive long
+    // enough to deliver it without making the visitor wait on it.
+    this.state.waitUntil(this._fireWebhook(registrationId));
+
     setTimeout(() => { try { ws.close(); } catch (_) {} }, 2000);
+  }
+
+  async _fireWebhook(registrationId) {
+    const url = this.session.businessConfig?.webhook_url;
+    if (!url) return;
+
+    const payload = {
+      event: "checkin.completed",
+      business_id: this.session.businessId,
+      business_name: this.session.businessConfig?.name || "",
+      registration_id: registrationId,
+      created_at: new Date().toISOString(),
+      answers: this.session.answers,
+      ocr_data: this.session.ocrData || null,
+    };
+    const body = JSON.stringify(payload);
+    const headers = { "Content-Type": "application/json" };
+
+    const secret = this.session.businessConfig?.webhook_secret;
+    if (secret) {
+      headers["X-Virtualobby-Signature"] = `sha256=${await computeHmacSha256Hex(secret, body)}`;
+    }
+
+    try {
+      const res = await fetch(url, { method: "POST", headers, body, signal: AbortSignal.timeout(8000) });
+      if (!res.ok) {
+        console.error(`Webhook delivery failed for business ${this.session.businessId}: HTTP ${res.status}`);
+      }
+    } catch (err) {
+      console.error(`Webhook delivery error for business ${this.session.businessId}: ${err.message}`);
+    }
   }
 }

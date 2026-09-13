@@ -15,6 +15,21 @@ function sanitizeVoiceId(id) {
   return VALID_VOICE_IDS.includes(id) ? id : 'anna';
 }
 
+// Optional per-business webhook a business's own software can receive
+// check-in data on. Must be a real https:// URL or empty — never silently
+// fall back to something else, since a wrong URL here just means the
+// webhook is disabled, not a broken voice/UX default like voice_id.
+function sanitizeWebhookUrl(url) {
+  const trimmed = (url || '').trim();
+  if (!trimmed) return '';
+  try {
+    const parsed = new URL(trimmed);
+    return parsed.protocol === 'https:' ? trimmed : '';
+  } catch (_) {
+    return '';
+  }
+}
+
 // ── CORS ──────────────────────────────────────────────────────────────────
 
 const CORS = {
@@ -343,8 +358,8 @@ export default {
         const requestedId = body.id || body.name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
         const id = await uniqueBusinessId(env, requestedId);
         await env.DB.prepare(
-          'INSERT INTO businesses (id, name, business_type, welcome_message, voice_id, voice_persona, requires_id_scan) VALUES (?, ?, ?, ?, ?, ?, ?)'
-        ).bind(id, body.name, body.business_type, body.welcome_message || 'Welcome!', sanitizeVoiceId(body.voice_id), body.voice_persona || '', body.requires_id_scan ?? 1).run();
+          'INSERT INTO businesses (id, name, business_type, welcome_message, voice_id, voice_persona, requires_id_scan, webhook_url, webhook_secret) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)'
+        ).bind(id, body.name, body.business_type, body.welcome_message || 'Welcome!', sanitizeVoiceId(body.voice_id), body.voice_persona || '', body.requires_id_scan ?? 1, sanitizeWebhookUrl(body.webhook_url), body.webhook_secret || '').run();
 
         // The admin UI submits template/custom questions inline on create —
         // these were previously silently dropped (only the business row got saved).
@@ -382,8 +397,8 @@ export default {
           if (!auth.ok) return jsonResponse({ error: auth.error }, auth.status);
           const body = await request.json();
           await env.DB.prepare(
-            'UPDATE businesses SET name=?, business_type=?, welcome_message=?, voice_id=?, voice_persona=?, requires_id_scan=? WHERE id=?'
-          ).bind(body.name, body.business_type, body.welcome_message, sanitizeVoiceId(body.voice_id), body.voice_persona || '', body.requires_id_scan ?? 1, id).run();
+            'UPDATE businesses SET name=?, business_type=?, welcome_message=?, voice_id=?, voice_persona=?, requires_id_scan=?, webhook_url=?, webhook_secret=? WHERE id=?'
+          ).bind(body.name, body.business_type, body.welcome_message, sanitizeVoiceId(body.voice_id), body.voice_persona || '', body.requires_id_scan ?? 1, sanitizeWebhookUrl(body.webhook_url), body.webhook_secret || '', id).run();
           return jsonResponse({ ok: true });
         }
         if (method === 'DELETE') {

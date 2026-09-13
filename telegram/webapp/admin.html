@@ -378,6 +378,18 @@
                     <div class="hint">How the agent should sound and behave — not the voice itself, see "Voice" above</div>
                 </div>
 
+                <div class="form-group">
+                    <label>Webhook URL (optional)</label>
+                    <input type="text" id="detail-webhook-url" placeholder="https://your-crm.example.com/webhooks/checkin">
+                    <div class="hint">Gets a POST with the visitor's data every time a check-in completes — plug this into your own CRM/PMS</div>
+                </div>
+
+                <div class="form-group">
+                    <label>Webhook Secret (optional)</label>
+                    <input type="text" id="detail-webhook-secret" placeholder="Leave blank to disable signing">
+                    <div class="hint">If set, requests carry an X-Virtualobby-Signature header (HMAC-SHA256) so you can verify they came from us</div>
+                </div>
+
                 <div class="toggle-row">
                     <span class="toggle-label">📷 Require ID Scan</span>
                     <div class="toggle" id="toggle-id-scan" onclick="this.classList.toggle('on')"></div>
@@ -466,6 +478,18 @@
                     <label>Voice Style / Tone</label>
                     <input type="text" id="create-persona" placeholder="e.g. warm and reassuring, speaks slowly">
                     <div class="hint">How the agent should sound and behave — not the voice itself, see "Voice" above</div>
+                </div>
+
+                <div class="form-group">
+                    <label>Webhook URL (optional)</label>
+                    <input type="text" id="create-webhook-url" placeholder="https://your-crm.example.com/webhooks/checkin">
+                    <div class="hint">Gets a POST with the visitor's data every time a check-in completes — plug this into your own CRM/PMS</div>
+                </div>
+
+                <div class="form-group">
+                    <label>Webhook Secret (optional)</label>
+                    <input type="text" id="create-webhook-secret" placeholder="Leave blank to disable signing">
+                    <div class="hint">If set, requests carry an X-Virtualobby-Signature header (HMAC-SHA256) so you can verify they came from us</div>
                 </div>
 
                 <div class="toggle-row">
@@ -716,6 +740,8 @@
             document.getElementById('detail-welcome').value = biz.welcome_message || '';
             document.getElementById('detail-voice-id').value = biz.voice_id || 'anna';
             document.getElementById('detail-persona').value = biz.voice_persona || '';
+            document.getElementById('detail-webhook-url').value = biz.webhook_url || '';
+            document.getElementById('detail-webhook-secret').value = biz.webhook_secret || '';
             
             const toggle = document.getElementById('toggle-id-scan');
             toggle.classList.toggle('on', biz.requires_id_scan !== false);
@@ -778,6 +804,8 @@
                 welcome_message: document.getElementById('detail-welcome').value,
                 voice_id: document.getElementById('detail-voice-id').value,
                 voice_persona: document.getElementById('detail-persona').value,
+                webhook_url: document.getElementById('detail-webhook-url').value,
+                webhook_secret: document.getElementById('detail-webhook-secret').value,
                 requires_id_scan: document.getElementById('toggle-id-scan').classList.contains('on'),
                 questions: detailQuestions,
             };
@@ -875,6 +903,8 @@
                 welcome_message: document.getElementById('create-welcome').value || `Welcome to ${name}! Let's get you checked in.`,
                 voice_id: document.getElementById('create-voice-id').value,
                 voice_persona: document.getElementById('create-persona').value,
+                webhook_url: document.getElementById('create-webhook-url').value,
+                webhook_secret: document.getElementById('create-webhook-secret').value,
                 requires_id_scan: document.getElementById('create-toggle-id').classList.contains('on'),
                 questions: createQuestions,
                 created: new Date().toISOString(),
@@ -899,6 +929,8 @@
                     document.getElementById('create-welcome').value = '';
                     document.getElementById('create-voice-id').value = 'anna';
                     document.getElementById('create-persona').value = '';
+                    document.getElementById('create-webhook-url').value = '';
+                    document.getElementById('create-webhook-secret').value = '';
                     createQuestions = [];
                     renderCreateQuestions();
                     

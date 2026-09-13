@@ -16,6 +16,14 @@ CREATE TABLE IF NOT EXISTS businesses (
   -- only voice field, which AssemblyAI's output.voice can't actually use.
   voice_persona TEXT DEFAULT '',
   requires_id_scan INTEGER DEFAULT 1,
+  -- Optional: POSTed with the check-in payload when a registration
+  -- completes, so a business's existing CRM/PMS/EHR can ingest visitor
+  -- data without any custom integration on their end. Empty = disabled.
+  webhook_url TEXT DEFAULT '',
+  -- Optional shared secret. When set, the webhook request carries an
+  -- X-Virtualobby-Signature: sha256=<hmac> header over the raw JSON body,
+  -- so the receiving system can verify the payload actually came from us.
+  webhook_secret TEXT DEFAULT '',
   created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );
 
