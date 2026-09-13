@@ -14,7 +14,11 @@ const CORS = {
 function jsonResponse(data, status = 200) {
   return new Response(JSON.stringify(data), {
     status,
-    headers: { 'Content-Type': 'application/json', ...CORS },
+    // Every response here is live, frequently-changing admin/business data —
+    // never let a browser, the Telegram in-app WebView, or an intermediate
+    // proxy cache it (the plain `fetch()` calls in admin.html/app.js don't
+    // set their own cache options, so nothing else was ruling this out).
+    headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store', ...CORS },
   });
 }
 
