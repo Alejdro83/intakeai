@@ -611,16 +611,24 @@
         
         function renderBusinessList() {
             const list = document.getElementById('biz-list');
-            const empty = document.getElementById('biz-empty');
-            
+            if (!list) return;
+
             if (!businesses.length) {
-                list.innerHTML = '';
-                list.appendChild(empty);
-                empty.classList.remove('hidden');
+                // Rebuild the empty-state markup directly instead of moving a
+                // persistent #biz-empty node in and out of the DOM — once
+                // list.innerHTML is overwritten below (the very first time
+                // there's at least one business, which is always, since the
+                // demo business already exists), that node is gone for good
+                // and every later re-render crashed trying to touch its
+                // classList, silently breaking Edit/QR/etc.
+                list.innerHTML = `
+                    <div class="empty-state" id="biz-empty">
+                        <p>No businesses yet.</p>
+                        <button class="btn btn-primary" style="margin-top:12px;" onclick="showView('create')">➕ Create Your First Business</button>
+                    </div>`;
                 return;
             }
-            
-            empty.classList.add('hidden');
+
             list.innerHTML = businesses.map(biz => {
                 const tpl = TEMPLATES[biz.business_type] || { icon: '🏢', name: biz.business_type };
                 return `
