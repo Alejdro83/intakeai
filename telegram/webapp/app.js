@@ -220,24 +220,7 @@ function handleDOMessage(msg) {
             state.businessName = msg.business_name || state.businessName;
             dbg('Questions count: ' + state.questions.length + ' ocrData: ' + JSON.stringify(state.ocrData));
             showStep('voice');
-            // Scanning is done — move to the interview phase regardless of
-            // whether OCR found anything (empty result is a valid outcome).
-            state.scanCompleted = true;
-            state.pendingInterviewHandoff = true;
-            dbg('scanCompleted=true aaiReady=' + state.aaiReady + ' voiceConnecting=' + state.voiceConnecting);
-            if (state.aaiReady) {
-                dbg('Voice already connected, switching to interview via session.update');
-                state.pendingInterviewHandoff = false;
-                sendInterviewHandoff();
-            } else if (!state.voiceConnecting) {
-                dbg('Voice not connected and not connecting — starting now');
-                connectToAssemblyAI().catch(err => {
-                    dbg('Voice failed: ' + err.message);
-                    updateStatus('Voice failed: ' + err.message);
-                });
-            } else {
-                dbg('Voice is connecting — interview handoff will happen on session.ready');
-            }
+            proceedToInterview();
             break;
 
         case 'state':
@@ -298,10 +281,7 @@ async function uploadAndProcess(blobOrFile, contentType) {
             dbg('OCR TIMEOUT (15s) — going to voice without OCR');
             updateStatus('Connecting voice (OCR timeout)...');
             showStep('voice');
-            connectToAssemblyAI().catch(err => {
-                dbg('Voice failed after OCR timeout: ' + err.message);
-                updateStatus('Voice failed: ' + err.message);
-            });
+            proceedToInterview();
         }, 15000);
 
     } catch (err) {
@@ -572,52 +552,96 @@ Do NOT ask any interview questions yet — the questionnaire happens later, once
 
 // Phase 2: the real check-in interview. Used either from the very start (no
 // scan required) or once OCR data is available (via sendInterviewHandoff).
+// The OCR confirmation ("Thank you Mr./Ms. X, is this correct?") is treated
+// as a separate step BEFORE the numbered questions, deliberately excluded
+// from submit_answer — the DO records answers by list position
+// (questions[currentQuestionIndex]), so submitting the OCR yes/no through
+// that tool would consume question 1's slot and shift every answer after it.
 function buildInterviewPrompt() {
     const ocrName = state.ocrData?.name || '';
     const ocrFields = state.ocrData ? Object.entries(state.ocrData).filter(([k, v]) => v && k !== 'name').map(([k, v]) => `${k}: ${v}`).join(', ') : '';
     const ocrSection = ocrName
-        ? `\nOCR DATA from visitor ID:\n- Name: ${ocrName}${ocrFields ? '\n- ' + ocrFields : ''}\n\nGreet by name, read back this data and ask "Is this correct?" Wait for confirmation before moving on.`
+        ? `\nID SCAN RESULT:\n- Name: ${ocrName}${ocrFields ? '\n- ' + ocrFields : ''}\n\nSTEP 1 (do this first, before any numbered question): thank the visitor by name — say something like "Thank you, Mr./Ms. ${ocrName}!" — then read back the data above and ask "Is this correct?" Wait for a yes or no. Do NOT call submit_answer for this — it is not one of the numbered questions. If they say it's wrong, apologize, ask them to state the correct information verbally, and move on to the questions anyway.`
         : '';
     const questionsList = (state.questions || []).map((q, i) => `${i + 1}. "${q.text}" (field: ${q.field})`).join('\n');
 
     return `You are a friendly virtual reception assistant at ${state.businessName || 'this office'}.
 ${ocrSection}
 
-QUESTIONS (ask ONE AT A TIME, in order):
+STEP 2 — QUESTIONS (ask ONE AT A TIME, in order, only after the ID scan is confirmed):
 ${questionsList}
 
 FLOW:
-${ocrSection ? '1. Confirm OCR data first' : '1. Start with questions'}
-2. Ask each question, wait for answer, confirm briefly ("Got it", "Understood", "Perfect")
-3. After confirming, call submit_answer tool with their answer
-4. Move to next question
-5. After all questions, summarize and ask "Is everything correct?"
+${ocrSection ? '1. Do STEP 1 (confirm ID scan) first\n2. Then STEP 2' : '1. Start with STEP 2'}
+- For each question: ask it, wait for the answer, confirm briefly ("Got it", "Understood", "Perfect"), then call submit_answer with their answer, then move to the next question
+- After all questions, summarize everything and ask "Is everything correct?"
 
 RULES:
 - Speak in the visitor's language
 - Keep sentences short — this is voice
 - Never generate your own questions
-- Call submit_answer only for confirmed answers`;
+- submit_answer is ONLY for the numbered questions in STEP 2 — never for the ID scan confirmation`;
 }
 
 function buildInterviewTools() {
     return [{
         type: 'function',
         name: 'submit_answer',
-        description: 'Submit the visitor answer for the current question.',
+        description: 'Submit the visitor answer for the current numbered question. Do not use this for the ID scan confirmation step.',
         parameters: { type: 'object', properties: { answer: { type: 'string' } }, required: ['answer'] },
     }];
 }
 
+// One-shot instructions for reply.create — see sendInterviewHandoff for why
+// this is needed at all (session.update alone doesn't make the agent speak).
+function buildInterviewHandoffInstructions() {
+    const ocrName = state.ocrData?.name || '';
+    return ocrName
+        ? `Say thank you to the visitor by name — "Thank you, Mr./Ms. ${ocrName}!" — then read back the ID scan data and ask "Is this correct?" Wait for their answer before doing anything else.`
+        : `Let the visitor know their document couldn't be read clearly, so you'll continue with a few quick questions instead, then ask the first question from the list.`;
+}
+
+// Scanning is done (OCR succeeded, failed, or was abandoned via timeout) —
+// move to the interview phase. Shared by the questions_ready handler and the
+// OCR-timeout fallback in uploadAndProcess, so both actually reach the
+// interview instead of leaving the agent stuck on the greeting-only prompt.
+function proceedToInterview() {
+    state.scanCompleted = true;
+    state.pendingInterviewHandoff = true;
+    dbg('scanCompleted=true aaiReady=' + state.aaiReady + ' voiceConnecting=' + state.voiceConnecting);
+    if (state.aaiReady) {
+        dbg('Voice already connected, switching to interview via session.update');
+        state.pendingInterviewHandoff = false;
+        sendInterviewHandoff();
+    } else if (!state.voiceConnecting) {
+        dbg('Voice not connected and not connecting — starting now');
+        connectToAssemblyAI().catch(err => {
+            dbg('Voice failed: ' + err.message);
+            updateStatus('Voice failed: ' + err.message);
+        });
+    } else {
+        dbg('Voice is connecting — interview handoff will happen on session.ready');
+    }
+}
+
 function sendInterviewHandoff() {
     if (state.aaiWs?.readyState !== 1) return;
-    dbg('Sending OCR catch-up via session.update (system_prompt/tools only)');
+    dbg('Sending interview handoff via session.update (system_prompt/tools only)');
     state.aaiWs.send(JSON.stringify({
         type: 'session.update',
         session: {
             system_prompt: buildInterviewPrompt(),
             tools: buildInterviewTools(),
         },
+    }));
+    // AssemblyAI docs: session.update alone never makes the agent speak — it
+    // stays silent until the next user utterance. The visitor has no reason
+    // to speak first right after uploading a photo, so nudge the agent to
+    // proactively confirm the scan via reply.create's one-shot instructions
+    // (these don't alter system_prompt, they just steer this one reply).
+    state.aaiWs.send(JSON.stringify({
+        type: 'reply.create',
+        instructions: buildInterviewHandoffInstructions(),
     }));
 }
 
