@@ -103,6 +103,7 @@ export class CheckinSession {
         case "start": return await this._handleStart(ws, data);
         case "user_transcript": return await this._handleTranscript(ws, data);
         case "id_uploaded": return await this._handleIdUploaded(ws, data);
+        case "ocr_correction": return await this._handleOcrCorrection(ws, data);
         case "confirm": return await this._handleConfirm(ws);
         default: return this._error(ws, `Unknown message type: ${data.type}`);
       }
@@ -207,6 +208,25 @@ export class CheckinSession {
     this.session.fsmState = "asking_questions";
     this._sendQuestionsReady(ws);
     this._sendCurrentQuestion(ws);
+    await this._saveSession();
+  }
+
+  /**
+   * The voice agent calls this (via the correct_ocr_field tool, forwarded
+   * by the browser) whenever the visitor corrects a piece of scanned ID
+   * data verbally. Without this, a spoken correction only ever lived in the
+   * LLM's own conversation memory — the agent would say it back correctly,
+   * but the stored ocrData (and so the final D1 record and any on-screen
+   * summary) stayed on the original, possibly-wrong OCR value forever.
+   */
+  async _handleOcrCorrection(ws, data) {
+    const { field, value } = data;
+    const allowed = ["name", "id_number", "date_of_birth", "address"];
+    if (!allowed.includes(field) || typeof value !== "string" || !value.trim()) {
+      return this._error(ws, "Invalid ocr_correction: field must be one of " + allowed.join(", ") + " with a non-empty value");
+    }
+    console.log("_handleOcrCorrection: " + field + " -> " + value);
+    this.session.ocrData = { ...(this.session.ocrData || {}), [field]: value.trim() };
     await this._saveSession();
   }
 

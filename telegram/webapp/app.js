@@ -568,11 +568,21 @@ function queueToolResult(msg) {
         dbg('Tool call queued submit_answer: ' + answer);
         if (state.doWs?.readyState === 1) state.doWs.send(JSON.stringify({ type: 'user_transcript', text: answer }));
         state.pendingToolResults.push({ call_id: msg.call_id, result: JSON.stringify({ success: true }) });
-    } else if (msg.name === 'submit_ocr_data') {
-        // The DO already ran OCR server-side; this call is just the agent
-        // acknowledging the data it was given — nothing to store.
-        dbg('Tool call queued submit_ocr_data: ' + JSON.stringify(msg.arguments));
-        state.pendingToolResults.push({ call_id: msg.call_id, result: JSON.stringify({ success: true }) });
+    } else if (msg.name === 'correct_ocr_field') {
+        // Without this, a spoken correction only ever lived in the LLM's own
+        // conversation memory — it would say the fix back correctly, but the
+        // stored ocrData (on-screen card, final summary, and the D1 record)
+        // stayed on the original wrong OCR value forever.
+        const field = msg.arguments?.field;
+        const value = msg.arguments?.value;
+        dbg('Tool call correct_ocr_field: ' + field + ' = ' + value);
+        const ok = !!(field && value);
+        if (ok) {
+            state.ocrData = { ...(state.ocrData || {}), [field]: value };
+            displayOCRResult(state.ocrData);
+            if (state.doWs?.readyState === 1) state.doWs.send(JSON.stringify({ type: 'ocr_correction', field, value }));
+        }
+        state.pendingToolResults.push({ call_id: msg.call_id, result: JSON.stringify({ success: ok }) });
     } else {
         dbg('Unhandled tool.call: ' + msg.name);
         state.pendingToolResults.push({ call_id: msg.call_id, result: JSON.stringify({ success: false, error: 'unknown tool' }) });
@@ -617,7 +627,7 @@ function buildInterviewPrompt() {
     const ocrName = state.ocrData?.name || '';
     const ocrFields = state.ocrData ? Object.entries(state.ocrData).filter(([k, v]) => v && k !== 'name').map(([k, v]) => `${k}: ${v}`).join(', ') : '';
     const ocrSection = ocrName
-        ? `\nID SCAN RESULT:\n- Name: ${ocrName}${ocrFields ? '\n- ' + ocrFields : ''}\n\nSTEP 1 (do this first, before any numbered question): thank the visitor by name — say something like "Thank you, Mr./Ms. ${ocrName}!" — then read back the data above and ask "Is this correct?" Wait for a yes or no. Do NOT call submit_answer for this — it is not one of the numbered questions. If they say it's wrong, apologize, ask them to state the correct information verbally, and move on to the questions anyway.`
+        ? `\nID SCAN RESULT:\n- Name: ${ocrName}${ocrFields ? '\n- ' + ocrFields : ''}\n\nSTEP 1 (do this first, before any numbered question): thank the visitor by name — say something like "Thank you, Mr./Ms. ${ocrName}!" — then read back the data above and ask "Is this correct?" Wait for a yes or no. Do NOT call submit_answer for this — it is not one of the numbered questions. If they say ANY field is wrong, ask them to state the correct value, then immediately call correct_ocr_field with that field and the corrected value — do this for every field they correct, before moving on to STEP 2.`
         : '';
     const questionsList = (state.questions || []).map((q, i) => `${i + 1}. "${q.text}" (field: ${q.field})`).join('\n');
 
@@ -636,16 +646,32 @@ RULES:
 - Speak in the visitor's language
 - Keep sentences short — this is voice
 - Never generate your own questions
-- submit_answer is ONLY for the numbered questions in STEP 2 — never for the ID scan confirmation`;
+- submit_answer is ONLY for the numbered questions in STEP 2 — never for the ID scan confirmation
+- correct_ocr_field is ONLY for fixing wrong ID scan data — call it as soon as the visitor states a correction, never skip this step`;
 }
 
 function buildInterviewTools() {
-    return [{
-        type: 'function',
-        name: 'submit_answer',
-        description: 'Submit the visitor answer for the current numbered question. Do not use this for the ID scan confirmation step.',
-        parameters: { type: 'object', properties: { answer: { type: 'string' } }, required: ['answer'] },
-    }];
+    return [
+        {
+            type: 'function',
+            name: 'submit_answer',
+            description: 'Submit the visitor answer for the current numbered question. Do not use this for the ID scan confirmation step.',
+            parameters: { type: 'object', properties: { answer: { type: 'string' } }, required: ['answer'] },
+        },
+        {
+            type: 'function',
+            name: 'correct_ocr_field',
+            description: 'Call this immediately when the visitor says any piece of the scanned ID data is wrong, with the field name and the corrected value they state. Must be called before moving on to the numbered questions.',
+            parameters: {
+                type: 'object',
+                properties: {
+                    field: { type: 'string', enum: ['name', 'id_number', 'date_of_birth', 'address'], description: 'Which ID field is being corrected' },
+                    value: { type: 'string', description: 'The corrected value, exactly as the visitor stated it' },
+                },
+                required: ['field', 'value'],
+            },
+        },
+    ];
 }
 
 // One-shot instructions for reply.create — see sendInterviewHandoff for why
