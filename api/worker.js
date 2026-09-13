@@ -201,7 +201,14 @@ export default {
     // ── Businesses: list all ──
     if (path === '/api/businesses' && method === 'GET') {
       try {
-        const { results } = await env.DB.prepare('SELECT * FROM businesses').all();
+        // registrations_count lets the admin's Submissions tab show, at a
+        // glance, which businesses actually have visitors — without it
+        // there was no way to tell an empty business apart from one that
+        // just hadn't been picked from the (bare, count-less) selector yet.
+        const { results } = await env.DB.prepare(
+          `SELECT b.*, (SELECT COUNT(*) FROM guest_registrations g WHERE g.business_id = b.id) AS registrations_count
+           FROM businesses b`
+        ).all();
         return jsonResponse({ businesses: results });
       } catch (e) {
         return jsonResponse({ error: e.message }, 500);

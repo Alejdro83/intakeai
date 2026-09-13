@@ -645,7 +645,7 @@
             if (!sel) return;
             const current = sel.value;
             sel.innerHTML = '<option value="">Select a business...</option>' +
-                businesses.map(b => `<option value="${b.id}">${b.name || b.id}</option>`).join('');
+                businesses.map(b => `<option value="${b.id}">${b.name || b.id} (${b.registrations_count || 0})</option>`).join('');
             sel.value = selectedBizId || current || '';
         }
 
@@ -924,21 +924,38 @@
             content.innerHTML = '<div style="text-align:center;padding:20px;"><span class="spinner"></span></div>';
 
             try {
-                const res = await fetch(`${API}/api/businesses/${selectedBizId}/registrations`, { headers: authHeaders() });
-                if (!res.ok) throw new Error('HTTP ' + res.status);
-                const data = await res.json();
+                const [regRes, qRes] = await Promise.all([
+                    fetch(`${API}/api/businesses/${selectedBizId}/registrations`, { headers: authHeaders() }),
+                    fetch(`${API}/api/businesses/${selectedBizId}/questions`),
+                ]);
+                if (!regRes.ok) throw new Error('HTTP ' + regRes.status);
+                const data = await regRes.json();
                 const subs = data.registrations || [];
+
+                // answers_json is keyed by question id (see checkin-do.js),
+                // not question text — map ids back to their text so this
+                // shows readable "Question: Answer" pairs instead of raw ids.
+                const questionText = {};
+                if (qRes.ok) {
+                    const qData = await qRes.json();
+                    for (const q of qData.questions || []) questionText[q.id] = q.question_text;
+                }
 
                 if (!subs.length) {
                     content.innerHTML = '<div class="empty-state">No visitors yet. Share your QR code to get started!</div>';
                     return;
                 }
 
-                let html = '<table class="sub-table"><tr><th>Name</th><th>ID Number</th><th>Status</th><th>Time</th></tr>';
+                let html = '<table class="sub-table"><tr><th>Name</th><th>ID Number</th><th>Answers</th><th>Status</th><th>Time</th></tr>';
                 subs.forEach(s => {
+                    const answers = s.answers || {};
+                    const answersHtml = Object.entries(answers)
+                        .map(([qId, ans]) => `<b>${questionText[qId] || qId}:</b> ${ans}`)
+                        .join('<br>') || '—';
                     html += `<tr>
                         <td>${s.ocr?.name || '—'}</td>
                         <td>${s.ocr?.id_number || '—'}</td>
+                        <td style="max-width:320px;">${answersHtml}</td>
                         <td>${s.status || 'completed'}</td>
                         <td>${new Date(s.created_at).toLocaleString()}</td>
                     </tr>`;
