@@ -12,6 +12,15 @@ const CONFIG = {
 
 const WIRE_RATE = 24_000;
 
+// AssemblyAI's defaults (vad_threshold 0.5, no interruption_delay) are quick
+// to treat any ambient sound as a barge-in — and once interrupted, the reply
+// is simply gone (no resume), so the agent re-decides what to say next,
+// which shows up as it re-asking the same question. Per AssemblyAI docs,
+// raising these two reduces false-positive interruptions from background
+// noise while still letting genuine speech interrupt; min_silence/max_silence
+// are deliberately left unset (adaptive end-of-turn timing).
+const TURN_DETECTION = { vad_threshold: 0.65, interruption_delay: 600 };
+
 // ── Debug Log (visible in UI) ────────────────────────────────────────────
 
 const _debugLines = [];
@@ -452,12 +461,14 @@ async function connectToAssemblyAI() {
                     system_prompt: buildGreetingOnlyPrompt(),
                     greeting: `Hello! Welcome to ${state.businessName || 'our office'}. My name is Anna and I'll be your virtual reception assistant today. Please upload your ID document using the button on screen.`,
                     output: { voice: 'anna' },
+                    input: { turn_detection: TURN_DETECTION },
                     tools: [],
                 }
                 : {
                     system_prompt: buildInterviewPrompt(),
                     greeting: `Hello! Welcome to ${state.businessName || 'our office'}. My name is Anna and I'll be your virtual reception assistant today. Let's get you checked in.`,
                     output: { voice: 'anna' },
+                    input: { turn_detection: TURN_DETECTION },
                     tools: buildInterviewTools(),
                 },
         };
@@ -581,7 +592,8 @@ function flushPendingToolResults() {
 // ── Voice prompts ────────────────────────────────────────────────────────
 // Two prompts, one per phase of the conversation. `greeting` is immutable
 // once a session is live (AssemblyAI docs), so the scan→interview handoff
-// (sendInterviewHandoff) only ever touches system_prompt/tools.
+// (sendInterviewHandoff) only ever touches system_prompt/tools/input
+// (turn_detection) — never greeting or output.
 
 // Phase 1 (only used while requires_id_scan is true and OCR hasn't landed
 // yet): announcement-only, no tools, agent stays quiet after the greeting
@@ -670,13 +682,16 @@ function proceedToInterview() {
 
 function sendInterviewHandoff() {
     if (state.aaiWs?.readyState !== 1) return;
-    dbg('Sending interview handoff via session.update (system_prompt/tools only)');
+    dbg('Sending interview handoff via session.update');
     state.micMuted = false; // scan is confirmed — let the mic through again
     state.aaiWs.send(JSON.stringify({
         type: 'session.update',
         session: {
             system_prompt: buildInterviewPrompt(),
             tools: buildInterviewTools(),
+            // Real conversation starts here (mic just unmuted) — this is the
+            // point where noise-robust turn detection actually matters most.
+            input: { turn_detection: TURN_DETECTION },
         },
     }));
     // AssemblyAI docs: session.update alone never makes the agent speak — it
