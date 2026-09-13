@@ -687,7 +687,7 @@
         function renderDetailQuestions() {
             const list = document.getElementById('detail-questions');
             list.innerHTML = detailQuestions.map((q, i) => {
-                const text = typeof q === 'string' ? q : q.text || q.question || '';
+                const text = typeof q === 'string' ? q : (q.question_text || q.text || q.question || '');
                 return `
                     <div class="question-item">
                         <span class="q-num">${i + 1}</span>
@@ -866,10 +866,15 @@
             showQRFor(selectedBizId);
         }
         
-        function showQRFor(bizId) {
-            selectedBizId = bizId;
+        async function showQRFor(bizId) {
+            // The QR/link section lives inside #biz-detail, which starts
+            // hidden and is only shown by selectBusiness() — calling this
+            // straight from the list's "QR" button without opening Edit
+            // first just unhid a section trapped inside a still-hidden
+            // parent, so nothing ever appeared.
+            await selectBusiness(bizId);
             const link = getTelegramLink(bizId);
-            
+
             document.getElementById('visit-link').textContent = link;
             document.getElementById('qr-section').classList.remove('hidden');
             
