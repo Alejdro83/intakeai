@@ -131,7 +131,12 @@ function initTelegram() {
     tg.ready(); tg.expand();
     const sp = (tg.initDataUnsafe || {}).start_param || '';
     dbg('start_param: ' + (sp || '(none)'));
-    if (sp) state.businessId = sp;
+    // admin.html's QR/link generator encodes ?start=business_<id> (see
+    // getTelegramLink in admin.html) — strip that prefix back off, otherwise
+    // every visitor arriving via a business's QR code gets a business_id
+    // that doesn't exist in D1 ("business_<id>" instead of "<id>") and the
+    // DO immediately errors out with "Business not found".
+    if (sp) state.businessId = sp.startsWith('business_') ? sp.slice('business_'.length) : sp;
 }
 
 async function init() {
