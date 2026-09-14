@@ -50,6 +50,11 @@
                 <div class="voice-controls">
                     <div class="voice-status"><span class="voice-wave"></span><span class="voice-label" id="voice-label">Listening...</span></div>
                 </div>
+                <!-- Backup for the voice confirmation — never make finishing depend
+                     only on the agent hearing a "yes" and calling a tool correctly. -->
+                <div class="scan-actions hidden" id="summary-actions" style="margin-top:12px;">
+                    <button class="btn btn-primary btn-scan-main" id="btn-confirm-summary">✅ Yes, that's correct</button>
+                </div>
             </div>
         </section>
 

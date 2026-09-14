@@ -105,6 +105,7 @@ const $ = (id) => document.getElementById(id) || document.querySelector(`.${id}`
 const elements = {
     stepScan: $('step-scan'), stepVoice: $('step-voice'), stepConfirm: $('step-confirm'),
     stepDocuments: $('step-documents'),
+    summaryActions: $('summary-actions'), btnConfirmSummary: $('btn-confirm-summary'),
     ocrResult: $('ocr-result'), ocrFields: $('ocr-fields'), ocrLoading: $('ocr-loading'),
     scanActions: $('scan-actions'), transcriptMessages: $('transcript-messages'),
     transcriptScroll: $('transcript-scroll'),
@@ -924,10 +925,21 @@ function showSummary(answers, ocr) {
     if (answers) for (const [q, a] of Object.entries(answers)) s += `• ${q}: ${a}\n`;
     if (ocr) { s += '\n📄 Document:\n'; for (const [k, v] of Object.entries(ocr)) if (v) s += `• ${k}: ${v}\n`; }
     addMessage('agent', s);
+    // Confirming should normally happen by voice (confirm_registration), but
+    // never make it the ONLY way to finish — an agent that says its goodbyes
+    // without actually calling the tool, or a voice connection that dropped
+    // right in this window, would otherwise leave the visitor stuck here
+    // with no way out. This button sends the same {type:'confirm'} directly.
+    elements.summaryActions?.classList.remove('hidden');
+}
+
+function hideSummaryActions() {
+    elements.summaryActions?.classList.add('hidden');
 }
 
 function showDone(registrationId) {
     state.checkinDone = true; // stop the DO WS reconnect loop from firing after a normal finish
+    hideSummaryActions();
     updateStatus('Check-in complete'); showStep('confirm');
     if (elements.confirmMessage) elements.confirmMessage.textContent = 'Your check-in is complete!';
     if (elements.confirmId) elements.confirmId.textContent = `Registration ID: ${registrationId}`;
@@ -974,6 +986,11 @@ function initEventListeners() {
         elements.btnDocumentsContinue.disabled = true;
         finishDocumentsStep();
     });
+    elements.btnConfirmSummary?.addEventListener('click', () => {
+        elements.btnConfirmSummary.disabled = true;
+        dbg('Manual confirm button pressed');
+        if (state.doWs?.readyState === 1) state.doWs.send(JSON.stringify({ type: 'confirm' }));
+    });
     elements.btnNewVisitor?.addEventListener('click', () => {
         state.answers = {}; state.ocrData = null;
         // Without this reset, a new visitor whose business also requires an
@@ -984,6 +1001,8 @@ function initEventListeners() {
         state.documentsUploadedCount = 0;
         if (elements.btnDocumentsContinue) { elements.btnDocumentsContinue.textContent = '➡️ Continue without uploading'; elements.btnDocumentsContinue.disabled = false; }
         if (elements.documentsUploadedCount) elements.documentsUploadedCount.classList.add('hidden');
+        if (elements.btnConfirmSummary) elements.btnConfirmSummary.disabled = false;
+        hideSummaryActions();
         if (elements.transcriptMessages) elements.transcriptMessages.innerHTML = '';
         cleanupAudio(); if (state.doWs) { state.doWs.close(); state.doWs = null; } connectToDO();
     });
