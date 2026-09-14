@@ -80,6 +80,7 @@ const state = {
     captureCtx: null, playbackCtx: null, playback: null, mic: null,
     aaiReady: false, questions: [], answers: {}, ocrData: null,
     requiresIdScan: false, voiceConnecting: false, pendingToolResults: [], checkinDone: false,
+    documentsUploadedCount: 0,
     // True once the DO has moved past scanning (questions_ready received),
     // regardless of whether OCR actually found anything — OCR is best-effort
     // and empty fields is an expected outcome, not a reason to stay in the
@@ -98,11 +99,14 @@ const state = {
 const $ = (id) => document.getElementById(id) || document.querySelector(`.${id}`);
 const elements = {
     stepScan: $('step-scan'), stepVoice: $('step-voice'), stepConfirm: $('step-confirm'),
+    stepDocuments: $('step-documents'),
     ocrResult: $('ocr-result'), ocrFields: $('ocr-fields'), ocrLoading: $('ocr-loading'),
     scanActions: $('scan-actions'), transcriptMessages: $('transcript-messages'),
     transcriptScroll: $('transcript-scroll'),
     statusDot: $('status-dot'), statusText: $('status-text'),
     btnNewVisitor: $('btn-new-visitor'), confirmMessage: $('confirm-message'), confirmId: $('confirm-id'),
+    documentsPrompt: $('documents-prompt'), documentsUpload: $('documents-upload'),
+    documentsUploadedCount: $('documents-uploaded-count'), btnDocumentsContinue: $('btn-documents-continue'),
 };
 
 // ── Helpers ────────────────────────────────────────────────────────────────
@@ -115,7 +119,7 @@ function updateStatus(text) {
 
 function showStep(step) {
     dbg('STEP → ' + step);
-    [{ scan: elements.stepScan, voice: elements.stepVoice, confirm: elements.stepConfirm }].forEach(steps => {
+    [{ scan: elements.stepScan, voice: elements.stepVoice, documents: elements.stepDocuments, confirm: elements.stepConfirm }].forEach(steps => {
         for (const [k, el] of Object.entries(steps)) if (el) el.classList.toggle('hidden', k !== step);
     });
 }
@@ -297,6 +301,14 @@ function handleDOMessage(msg) {
         case 'state':
             dbg('Question state: ' + (msg.index + 1) + '/' + msg.total + ': ' + msg.question);
             updateStatus(`Question ${msg.index + 1}/${msg.total}: ${msg.question}`);
+            break;
+
+        case 'request_documents':
+            dbg('Request documents received: ' + msg.prompt);
+            if (elements.documentsPrompt) elements.documentsPrompt.textContent = msg.prompt || '';
+            state.micMuted = true; // this step is UI-driven, not a voice exchange
+            showStep('documents');
+            announceDocumentsStep(msg.prompt);
             break;
 
         case 'summary': showSummary(msg.answers, msg.ocr); break;
@@ -834,6 +846,52 @@ function sendInterviewHandoff() {
     }));
 }
 
+// Narrates the optional documents step — the actual advance is 100%
+// UI-driven (upload button / continue button), never a tool call, so
+// there's no risk of the agent "forgetting" to move things along the way
+// confirm_registration turned out to need fixing for the summary step.
+function announceDocumentsStep(prompt) {
+    if (state.aaiWs?.readyState !== 1) return;
+    dbg('Announcing documents step via reply.create');
+    state.aaiWs.send(JSON.stringify({
+        type: 'reply.create',
+        instructions: `Tell the visitor: "${prompt}" Then stay quiet — this step doesn't need you until they finish it.`,
+    }));
+}
+
+async function uploadDocuments(fileList) {
+    if (!state.sessionId || !fileList || !fileList.length) return;
+    let uploaded = 0;
+    for (const file of fileList) {
+        try {
+            const putResp = await fetch(`${CONFIG.API_URL}/api/ws/${state.sessionId}`, {
+                method: 'PUT',
+                headers: { 'Content-Type': file.type || 'application/octet-stream' },
+                body: file,
+            });
+            if (!putResp.ok) throw new Error('HTTP ' + putResp.status);
+            uploaded++;
+            dbg('Document uploaded: ' + file.name);
+        } catch (err) {
+            dbg('Document upload failed (' + file.name + '): ' + err.message);
+            updateStatus('Failed to upload ' + file.name);
+        }
+    }
+    state.documentsUploadedCount += uploaded;
+    if (elements.documentsUploadedCount) {
+        elements.documentsUploadedCount.textContent = `${state.documentsUploadedCount} file(s) uploaded`;
+        elements.documentsUploadedCount.classList.toggle('hidden', state.documentsUploadedCount === 0);
+    }
+    if (elements.btnDocumentsContinue && state.documentsUploadedCount > 0) {
+        elements.btnDocumentsContinue.textContent = '➡️ Continue';
+    }
+}
+
+function finishDocumentsStep() {
+    state.micMuted = false;
+    if (state.doWs?.readyState === 1) state.doWs.send(JSON.stringify({ type: 'documents_done' }));
+}
+
 // ── Helpers ────────────────────────────────────────────────────────────────
 
 async function addWorklet(ctx, code, name) {
@@ -903,6 +961,14 @@ function initEventListeners() {
         if (file) uploadAndProcess(file, file.type);
         e.target.value = '';
     });
+    $('documents-upload')?.addEventListener('change', (e) => {
+        uploadDocuments(e.target.files);
+        e.target.value = '';
+    });
+    elements.btnDocumentsContinue?.addEventListener('click', () => {
+        elements.btnDocumentsContinue.disabled = true;
+        finishDocumentsStep();
+    });
     elements.btnNewVisitor?.addEventListener('click', () => {
         state.answers = {}; state.ocrData = null;
         // Without this reset, a new visitor whose business also requires an
@@ -910,6 +976,9 @@ function initEventListeners() {
         // since scanCompleted/requiresIdScan would still carry over true
         // from the previous visitor's finished session.
         state.scanCompleted = false; state.pendingInterviewHandoff = false; state.requiresIdScan = false;
+        state.documentsUploadedCount = 0;
+        if (elements.btnDocumentsContinue) { elements.btnDocumentsContinue.textContent = '➡️ Continue without uploading'; elements.btnDocumentsContinue.disabled = false; }
+        if (elements.documentsUploadedCount) elements.documentsUploadedCount.classList.add('hidden');
         if (elements.transcriptMessages) elements.transcriptMessages.innerHTML = '';
         cleanupAudio(); if (state.doWs) { state.doWs.close(); state.doWs = null; } connectToDO();
     });

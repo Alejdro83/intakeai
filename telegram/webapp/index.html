@@ -53,6 +53,20 @@
             </div>
         </section>
 
+        <!-- Optional step: additional documents (clinics, law firms, etc.) -->
+        <section class="step hidden" id="step-documents">
+            <div class="step-header"><h2>📎 Additional Documents</h2></div>
+            <p class="step-description" id="documents-prompt">Please upload any additional documents, or continue if you have none.</p>
+
+            <div class="scan-actions">
+                <label class="btn btn-primary btn-scan-main" for="documents-upload">📤 Upload Files</label>
+                <input type="file" id="documents-upload" multiple style="display:none;">
+            </div>
+            <p id="documents-uploaded-count" class="step-description hidden"></p>
+
+            <button class="btn btn-secondary" id="btn-documents-continue" style="margin-top:16px;width:100%;">➡️ Continue without uploading</button>
+        </section>
+
         <!-- Step 3: Done -->
         <section class="step hidden" id="step-confirm">
             <div class="step-header"><span class="step-number">3</span><h2>Registration Complete</h2></div>

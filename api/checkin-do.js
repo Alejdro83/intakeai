@@ -69,26 +69,37 @@ export class CheckinSession {
   }
 
   /**
-   * Receives the ID photo directly (PUT /api/ws/<uuid>). Only accepted while
-   * this visitor's own session is waiting for a scan — that's what stops it
-   * from being an open write proxy into R2 for anyone who finds the URL.
+   * Receives a file directly (PUT /api/ws/<uuid>) — either the ID photo
+   * while scanning_doc, or one of the optional additional documents while
+   * uploading_documents. Only accepted in those two states — that's what
+   * stops it from being an open write proxy into R2 for anyone who finds
+   * the URL.
    */
   async _handleUploadRequest(request) {
     await this._loadSession();
-    if (this.session.fsmState !== "scanning_doc") {
+    const fsmState = this.session.fsmState;
+    if (fsmState !== "scanning_doc" && fsmState !== "uploading_documents") {
       return new Response(
-        JSON.stringify({ error: "Not expecting a document upload right now (state=" + this.session.fsmState + ")" }),
+        JSON.stringify({ error: "Not expecting an upload right now (state=" + fsmState + ")" }),
         { status: 409, headers: { "Content-Type": "application/json" } }
       );
     }
-    const contentType = request.headers.get("Content-Type") || "image/jpeg";
-    const key = `ids/${this.session.businessId || "unknown"}/${crypto.randomUUID()}.jpg`;
+    const isIdScan = fsmState === "scanning_doc";
+    const contentType = request.headers.get("Content-Type") || (isIdScan ? "image/jpeg" : "application/octet-stream");
+    const key = isIdScan
+      ? `ids/${this.session.businessId || "unknown"}/${crypto.randomUUID()}.jpg`
+      : `docs/${this.session.businessId || "unknown"}/${crypto.randomUUID()}`;
     try {
       await this.env.R2_DOCS.put(key, request.body, { httpMetadata: { contentType } });
     } catch (err) {
       return new Response(JSON.stringify({ error: `Upload failed: ${err.message}` }), {
         status: 500, headers: { "Content-Type": "application/json" },
       });
+    }
+    if (!isIdScan) {
+      this.session.additionalDocs = this.session.additionalDocs || [];
+      this.session.additionalDocs.push({ r2_key: key, content_type: contentType });
+      await this._saveSession();
     }
     return new Response(JSON.stringify({ ok: true, r2_key: key }), {
       headers: { "Content-Type": "application/json" },
@@ -114,6 +125,7 @@ export class CheckinSession {
         case "id_uploaded": return await this._handleIdUploaded(ws, data);
         case "ocr_correction": return await this._handleOcrCorrection(ws, data);
         case "confirm": return await this._handleConfirm(ws);
+        case "documents_done": return await this._handleDocumentsDone(ws);
         case "resume": return await this._handleResume(ws);
         default: return this._error(ws, `Unknown message type: ${data.type}`);
       }
@@ -215,6 +227,9 @@ export class CheckinSession {
         break;
       case "asking_questions":
         this._sendCurrentQuestion(ws);
+        break;
+      case "uploading_documents":
+        this._goToUploadingDocuments(ws);
         break;
       case "confirming":
         this._goToConfirming(ws);
@@ -368,7 +383,7 @@ export class CheckinSession {
   _sendCurrentQuestion(ws) {
     const { questions, currentQuestionIndex } = this.session;
     if (currentQuestionIndex >= questions.length) {
-      return this._goToConfirming(ws);
+      return this._finishQuestions(ws);
     }
     const q = questions[currentQuestionIndex];
     this._send(ws, {
@@ -394,6 +409,39 @@ export class CheckinSession {
   }
 
   /* ------------------------------------------------------------------ */
+  /*  FSM: asking_questions → uploading_documents (optional) → confirming */
+  /* ------------------------------------------------------------------ */
+
+  // All numbered questions are answered — either go straight to confirming
+  // (the common case) or, for business types like clinics/law firms that
+  // need more than the ID, stop for an optional attachment step first.
+  _finishQuestions(ws) {
+    if (this.session.businessConfig?.requires_documents) {
+      return this._goToUploadingDocuments(ws);
+    }
+    return this._goToConfirming(ws);
+  }
+
+  _goToUploadingDocuments(ws) {
+    this.session.fsmState = "uploading_documents";
+    this._send(ws, {
+      type: "request_documents",
+      prompt: this.session.businessConfig?.documents_prompt ||
+        "Please upload any additional documents, or continue if you have none.",
+    });
+  }
+
+  // The visitor tapped Continue on the documents step — whether or not they
+  // actually uploaded anything, this always advances (never blocks on it).
+  async _handleDocumentsDone(ws) {
+    if (this.session.fsmState !== "uploading_documents") {
+      return this._error(ws, "Not expecting documents_done (state=" + this.session.fsmState + ")");
+    }
+    this._goToConfirming(ws);
+    await this._saveSession();
+  }
+
+  /* ------------------------------------------------------------------ */
   /*  FSM: confirming → done                                            */
   /* ------------------------------------------------------------------ */
 
@@ -415,13 +463,14 @@ export class CheckinSession {
 
     try {
       await this.env.DB.prepare(
-        `INSERT INTO guest_registrations (id, business_id, answers_json, ocr_data_json, id_image_r2_key, status) VALUES (?, ?, ?, ?, ?, 'completed')`
+        `INSERT INTO guest_registrations (id, business_id, answers_json, ocr_data_json, id_image_r2_key, documents_json, status) VALUES (?, ?, ?, ?, ?, ?, 'completed')`
       ).bind(
         registrationId,
         this.session.businessId,
         JSON.stringify(this.session.answers),
         JSON.stringify(this.session.ocrData || {}),
-        this.session.idImageR2Key || null
+        this.session.idImageR2Key || null,
+        JSON.stringify(this.session.additionalDocs || [])
       ).run();
     } catch (err) {
       return this._error(ws, `Failed to save registration: ${err.message}`);

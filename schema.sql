@@ -24,6 +24,14 @@ CREATE TABLE IF NOT EXISTS businesses (
   -- X-Virtualobby-Signature: sha256=<hmac> header over the raw JSON body,
   -- so the receiving system can verify the payload actually came from us.
   webhook_secret TEXT DEFAULT '',
+  -- Optional: a second, generic attachment step after the numbered
+  -- questions (insurance card, referral letter, etc.) — for business types
+  -- like clinics/law firms that need more than just the ID. Never blocks
+  -- completion even when on; the visitor can always tap through with none.
+  requires_documents INTEGER DEFAULT 0,
+  -- Custom prompt for that step (e.g. "Please upload your insurance card").
+  -- Empty = a generic fallback message.
+  documents_prompt TEXT DEFAULT '',
   created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );
 
@@ -43,6 +51,9 @@ CREATE TABLE IF NOT EXISTS guest_registrations (
   answers_json TEXT,
   ocr_data_json TEXT,
   id_image_r2_key TEXT,
+  -- JSON array of {r2_key, content_type} for the optional attachment step —
+  -- always '[]' when requires_documents is off or nothing was uploaded.
+  documents_json TEXT DEFAULT '[]',
   status TEXT DEFAULT 'completed',
   created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
   FOREIGN KEY (business_id) REFERENCES businesses(id)

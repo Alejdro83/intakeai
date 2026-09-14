@@ -351,6 +351,7 @@ export default {
           ...r,
           answers: safeJsonParse(r.answers_json),
           ocr: safeJsonParse(r.ocr_data_json),
+          documents: safeJsonParse(r.documents_json) || [],
         }));
         return jsonResponse({ registrations });
       } catch (e) {
@@ -372,6 +373,30 @@ export default {
       }
     }
 
+    // ── Businesses: download one uploaded document from a registration ──
+    const documentMatch = path.match(/^\/api\/businesses\/([^/]+)\/registrations\/([^/]+)\/documents\/(\d+)$/);
+    if (documentMatch && method === 'GET') {
+      const auth = await requireAdmin(request, env);
+      if (!auth.ok) return jsonResponse({ error: auth.error }, auth.status);
+      const [, bizId, regId, idxStr] = documentMatch;
+      try {
+        const reg = await env.DB.prepare(
+          'SELECT documents_json FROM guest_registrations WHERE id = ? AND business_id = ?'
+        ).bind(regId, bizId).first();
+        if (!reg) return jsonResponse({ error: 'Registration not found' }, 404);
+        const docs = safeJsonParse(reg.documents_json) || [];
+        const doc = docs[Number(idxStr)];
+        if (!doc) return jsonResponse({ error: 'Document not found' }, 404);
+        const obj = await env.R2_DOCS.get(doc.r2_key);
+        if (!obj) return jsonResponse({ error: 'File missing in storage' }, 404);
+        return new Response(obj.body, {
+          headers: { ...CORS, 'Content-Type': doc.content_type || 'application/octet-stream', 'Cache-Control': 'no-store' },
+        });
+      } catch (e) {
+        return jsonResponse({ error: e.message }, 500);
+      }
+    }
+
     // ── Businesses: create ──
     if (path === '/api/businesses' && method === 'POST') {
       const auth = await requireAdmin(request, env);
@@ -382,8 +407,8 @@ export default {
         const requestedId = body.id || body.name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
         const id = await uniqueBusinessId(env, requestedId);
         await env.DB.prepare(
-          'INSERT INTO businesses (id, name, business_type, welcome_message, voice_id, voice_persona, requires_id_scan, webhook_url, webhook_secret) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)'
-        ).bind(id, body.name, body.business_type, body.welcome_message || 'Welcome!', sanitizeVoiceId(body.voice_id), body.voice_persona || '', body.requires_id_scan ?? 1, sanitizeWebhookUrl(body.webhook_url), body.webhook_secret || '').run();
+          'INSERT INTO businesses (id, name, business_type, welcome_message, voice_id, voice_persona, requires_id_scan, webhook_url, webhook_secret, requires_documents, documents_prompt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
+        ).bind(id, body.name, body.business_type, body.welcome_message || 'Welcome!', sanitizeVoiceId(body.voice_id), body.voice_persona || '', body.requires_id_scan ?? 1, sanitizeWebhookUrl(body.webhook_url), body.webhook_secret || '', body.requires_documents ? 1 : 0, body.documents_prompt || '').run();
 
         // The admin UI submits template/custom questions inline on create —
         // these were previously silently dropped (only the business row got saved).
@@ -421,8 +446,8 @@ export default {
           if (!auth.ok) return jsonResponse({ error: auth.error }, auth.status);
           const body = await request.json();
           await env.DB.prepare(
-            'UPDATE businesses SET name=?, business_type=?, welcome_message=?, voice_id=?, voice_persona=?, requires_id_scan=?, webhook_url=?, webhook_secret=? WHERE id=?'
-          ).bind(body.name, body.business_type, body.welcome_message, sanitizeVoiceId(body.voice_id), body.voice_persona || '', body.requires_id_scan ?? 1, sanitizeWebhookUrl(body.webhook_url), body.webhook_secret || '', id).run();
+            'UPDATE businesses SET name=?, business_type=?, welcome_message=?, voice_id=?, voice_persona=?, requires_id_scan=?, webhook_url=?, webhook_secret=?, requires_documents=?, documents_prompt=? WHERE id=?'
+          ).bind(body.name, body.business_type, body.welcome_message, sanitizeVoiceId(body.voice_id), body.voice_persona || '', body.requires_id_scan ?? 1, sanitizeWebhookUrl(body.webhook_url), body.webhook_secret || '', body.requires_documents ? 1 : 0, body.documents_prompt || '', id).run();
           return jsonResponse({ ok: true });
         }
         if (method === 'DELETE') {

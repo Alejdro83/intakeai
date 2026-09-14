@@ -394,7 +394,17 @@
                     <span class="toggle-label">📷 Require ID Scan</span>
                     <div class="toggle" id="toggle-id-scan" onclick="this.classList.toggle('on')"></div>
                 </div>
-                
+
+                <div class="toggle-row">
+                    <span class="toggle-label">📎 Require Additional Documents</span>
+                    <div class="toggle" id="toggle-documents" onclick="this.classList.toggle('on')"></div>
+                </div>
+                <div class="form-group">
+                    <label>Documents Prompt</label>
+                    <input type="text" id="detail-documents-prompt" placeholder="e.g. Please upload your insurance card">
+                    <div class="hint">Spoken and shown after the questions — visitor can always skip if they have nothing to attach</div>
+                </div>
+
                 <div class="form-group" style="margin-top: 20px;">
                     <label>Check-in Questions</label>
                     <div id="detail-questions"></div>
@@ -496,7 +506,17 @@
                     <span class="toggle-label">📷 Require ID Scan</span>
                     <div class="toggle on" id="create-toggle-id" onclick="this.classList.toggle('on')"></div>
                 </div>
-                
+
+                <div class="toggle-row">
+                    <span class="toggle-label">📎 Require Additional Documents</span>
+                    <div class="toggle" id="create-toggle-documents" onclick="this.classList.toggle('on')"></div>
+                </div>
+                <div class="form-group">
+                    <label>Documents Prompt</label>
+                    <input type="text" id="create-documents-prompt" placeholder="e.g. Please upload your insurance card">
+                    <div class="hint">Spoken and shown after the questions — visitor can always skip if they have nothing to attach</div>
+                </div>
+
                 <div class="form-group" style="margin-top: 20px;">
                     <label>Check-in Questions</label>
                     <div id="create-questions"></div>
@@ -742,9 +762,11 @@
             document.getElementById('detail-persona').value = biz.voice_persona || '';
             document.getElementById('detail-webhook-url').value = biz.webhook_url || '';
             document.getElementById('detail-webhook-secret').value = biz.webhook_secret || '';
-            
+            document.getElementById('detail-documents-prompt').value = biz.documents_prompt || '';
+
             const toggle = document.getElementById('toggle-id-scan');
             toggle.classList.toggle('on', biz.requires_id_scan !== false);
+            document.getElementById('toggle-documents').classList.toggle('on', !!biz.requires_documents);
             
             // Load questions
             detailQuestions = biz.questions || [];
@@ -807,6 +829,8 @@
                 webhook_url: document.getElementById('detail-webhook-url').value,
                 webhook_secret: document.getElementById('detail-webhook-secret').value,
                 requires_id_scan: document.getElementById('toggle-id-scan').classList.contains('on'),
+                requires_documents: document.getElementById('toggle-documents').classList.contains('on'),
+                documents_prompt: document.getElementById('detail-documents-prompt').value,
                 questions: detailQuestions,
             };
             
@@ -906,6 +930,8 @@
                 webhook_url: document.getElementById('create-webhook-url').value,
                 webhook_secret: document.getElementById('create-webhook-secret').value,
                 requires_id_scan: document.getElementById('create-toggle-id').classList.contains('on'),
+                requires_documents: document.getElementById('create-toggle-documents').classList.contains('on'),
+                documents_prompt: document.getElementById('create-documents-prompt').value,
                 questions: createQuestions,
             };
             
@@ -930,6 +956,8 @@
                     document.getElementById('create-persona').value = '';
                     document.getElementById('create-webhook-url').value = '';
                     document.getElementById('create-webhook-secret').value = '';
+                    document.getElementById('create-toggle-documents').classList.remove('on');
+                    document.getElementById('create-documents-prompt').value = '';
                     createQuestions = [];
                     renderCreateQuestions();
                     
@@ -1036,16 +1064,21 @@
                     return;
                 }
 
-                let html = '<table class="sub-table"><tr><th>Name</th><th>ID Number</th><th>Answers</th><th>Status</th><th>Time</th><th></th></tr>';
+                let html = '<table class="sub-table"><tr><th>Name</th><th>ID Number</th><th>Answers</th><th>Docs</th><th>Status</th><th>Time</th><th></th></tr>';
                 subs.forEach(s => {
                     const answers = s.answers || {};
                     const answersHtml = Object.entries(answers)
                         .map(([qId, ans]) => `<b>${questionText[qId] || qId}:</b> ${ans}`)
                         .join('<br>') || '—';
+                    const docs = s.documents || [];
+                    const docsHtml = docs.length
+                        ? docs.map((d, i) => `<a href="javascript:void(0)" onclick="viewDocument('${selectedBizId}','${s.id}',${i})">📎 ${i + 1}</a>`).join(' ')
+                        : '—';
                     html += `<tr>
                         <td>${s.ocr?.name || '—'}</td>
                         <td>${s.ocr?.id_number || '—'}</td>
                         <td style="max-width:320px;">${answersHtml}</td>
+                        <td>${docsHtml}</td>
                         <td>${s.status || 'completed'}</td>
                         <td>${new Date(s.created_at).toLocaleString()}</td>
                         <td><button class="btn btn-sm btn-danger" onclick="deleteRegistration('${selectedBizId}', '${s.id}')">🗑️</button></td>
@@ -1067,6 +1100,20 @@
                 loadSubmissions();
             } catch (err) {
                 toast('❌ Failed to delete: ' + err.message);
+            }
+        }
+
+        // A plain <a href> can't carry the admin auth header, so this fetches
+        // the (admin-only) document as an authenticated request and opens the
+        // resulting blob instead — the URL itself is never public.
+        async function viewDocument(bizId, regId, idx) {
+            try {
+                const res = await fetch(`${API}/api/businesses/${bizId}/registrations/${regId}/documents/${idx}`, { headers: authHeaders() });
+                if (!res.ok) throw new Error('HTTP ' + res.status);
+                const blob = await res.blob();
+                window.open(URL.createObjectURL(blob), '_blank');
+            } catch (err) {
+                toast('❌ Failed to open document: ' + err.message);
             }
         }
         
