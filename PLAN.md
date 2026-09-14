@@ -1,3 +1,6 @@
+> **⚠️ Historical document.** This plan guided initial development but the live architecture has since evolved. For current endpoints, flows, and setup, see [README.md](README.md). Key differences: no presigned R2 URLs (upload goes through the Durable Object), no client-side Tesseract (OCR uses Workers AI vision server-side), and the voice agent is configured per-session in app.js rather than via published agent definitions.
+>
+
 # Virtualobby — Implementation Plan (Revised v2)
 
 > AssemblyAI Voice Agent Hackathon — Deadline: September 30, 2026

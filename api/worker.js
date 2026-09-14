@@ -167,6 +167,18 @@ async function handleTelegramUpdate(update, env) {
 
 // ── URL Router ────────────────────────────────────────────────────────────
 
+// Simple in-memory rate limiter for token endpoint (best-effort, resets on isolate restart)
+const _tokenHits = new Map();
+function checkTokenRateLimit(ip, maxPerMinute = 10) {
+  const now = Date.now();
+  const entry = _tokenHits.get(ip) || { count: 0, resetAt: now + 60000 };
+  if (now > entry.resetAt) { entry.count = 0; entry.resetAt = now + 60000; }
+  if (entry.count >= maxPerMinute) return false;
+  entry.count++;
+  _tokenHits.set(ip, entry);
+  return true;
+}
+
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
@@ -196,6 +208,10 @@ export default {
 
     // ── AssemblyAI session token ──
     if (path === '/api/token' && method === 'GET') {
+      const _clientIp = request.headers.get('CF-Connecting-IP') || 'unknown';
+      if (!checkTokenRateLimit(_clientIp)) {
+        return jsonResponse({ error: 'Rate limit exceeded. Try again in a minute.' }, 429);
+      }
       try {
         const resp = await fetch(
           'https://agents.assemblyai.com/v1/token?product=voice_agent&expires_in_seconds=60',

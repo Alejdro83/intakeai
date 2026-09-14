@@ -138,8 +138,7 @@ intakeai/
 ├── wrangler.toml                # Cloudflare Worker + D1 + R2 + DO + Workers AI config
 ├── telegram/webapp/             # The two UIs (static, no build step)
 │   ├── index.html / app.js      # Visitor check-in (voice + camera)
-│   ├── admin.html                # Business/questions config + registrations
-│   └── visit.html
+│   └── admin.html                # Business/questions config + registrations
 ├── deployment/, api/server.py, lib.py, publish.py, import_agent.py
 │                               # Earlier plain-Python build from the AssemblyAI
 │                               # starter template — see AGENTS.md. Not what's

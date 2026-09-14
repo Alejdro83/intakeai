@@ -1,3 +1,9 @@
+// ⚠️ ARCHIVED — NOT used by the live app.
+// The live voice agent is configured dynamically per-session in telegram/webapp/app.js
+// via session.update, not through published agent definitions.
+// These HTTP tools reference endpoints that no longer exist.
+// Kept as reference for the AssemblyAI Voice Agent API schema only.
+
 // Virtualobby — Voice Relay Agent
 // Reads questions sent by the system, waits for user answers.
 // The backend (Durable Object) drives the questionnaire flow.
