@@ -4,9 +4,14 @@
 
 # Virtualobby — Universal Virtual Reception Agent
 
-[![Voice Agent API](https://img.shields.io/badge/docs-Voice%20Agent%20API-2545E6)](https://www.assemblyai.com/docs/voice-agents/voice-agent-api)
-[![Python](https://img.shields.io/badge/python-%E2%89%A53.9-3776AB?logo=python&logoColor=white)](https://www.python.org)
-[![AssemblyAI](https://img.shields.io/badge/AssemblyAI-Voice%20Agent-2545E6)](https://www.assemblyai.com)
+[![lablab.ai — AssemblyAI Voice Agent Hackathon](https://img.shields.io/badge/lablab.ai-AssemblyAI%20Voice%20Agent%20Hackathon-2545E6)](https://lablab.ai/ai-hackathons/assemblyai-voice-agent-hackathon)
+[![Cloudflare Workers](https://img.shields.io/badge/Cloudflare-Workers%20%2B%20D1%20%2B%20R2-F38020?logo=cloudflare&logoColor=white)](https://workers.cloudflare.com)
+[![AssemblyAI Voice Agent API](https://img.shields.io/badge/AssemblyAI-Voice%20Agent%20API-2545E6)](https://www.assemblyai.com/docs/voice-agents/voice-agent-api)
+[![live demo](https://img.shields.io/badge/demo-intakeai--col.pages.dev-00C805)](https://intakeai-col.pages.dev)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
+
+Submission for lablab.ai's **AssemblyAI Voice Agent Hackathon**
+(1–30 Sep 2026).
 
 > **Scan documents, ask questions, register visitors — all by voice.**
 
@@ -34,16 +39,37 @@ Virtualobby is a universal reception agent powered by AssemblyAI's Voice Agent A
 
 The webapp works as:
 
-1. **Telegram Mini App** — Open @Virtualobby_bot in Telegram
-2. **Standalone Web Page** — Open the URL directly in any browser
+1. **Telegram Mini App** — Open [@Virtu_intake_bot](https://t.me/Virtu_intake_bot) in Telegram
+2. **Standalone Web Page** — [intakeai-col.pages.dev](https://intakeai-col.pages.dev), or any URL it's deployed to
 
 ### Features
 
 - 📷 Camera access for document scanning
 - 🎤 Voice interaction with AssemblyAI
 - 📱 Mobile-first responsive design
-- 🔍 Browser-side OCR with Tesseract.js
+- 🔍 Server-side OCR via Workers AI vision (`@cf/meta/llama-3.2-11b-vision-instruct`) — not browser-side
 - 🎯 Works on phone, tablet, and desktop
+
+## How it works
+
+```mermaid
+flowchart TD
+    V["Visitor — Telegram Mini App or browser"] -->|"static UI"| P["Cloudflare Pages<br>index.html / app.js / admin.html"]
+    P -->|"WS: /api/ws/:sessionId"| W["Cloudflare Worker<br>api/worker.js"]
+    W -->|"upgrade"| DO[["Durable Object: CheckinSession<br>per-visitor FSM"]]
+    DO <--> D1[("D1 — businesses, questions, registrations")]
+    DO -->|"ID photo"| R2[("R2 — document photos")]
+    DO -->|"vision OCR"| AI["Workers AI<br>llama-3.2-11b-vision-instruct"]
+    P -->|"direct WS, token from GET /api/token"| AAI["AssemblyAI Voice Agent API<br>wss://agents.assemblyai.com/v1/ws"]
+    DO -->|"on check-in complete, if configured"| HOOK["Business's own CRM/PMS<br>signed webhook (HMAC-SHA256)"]
+    ADM["Admin (Telegram-authenticated)"] -->|"REST API"| W
+```
+
+The browser talks to AssemblyAI **directly** over its own WebSocket — the
+Worker only mints a short-lived token (`GET /api/token`) and never sees or
+relays audio. The Durable Object never talks to AssemblyAI either; it only
+holds the FSM state, reads/writes D1, stores the ID photo in R2, and runs
+OCR through Workers AI. Full write-up: [`PLAN.md`](PLAN.md).
 
 ## 🚀 Quick Start (real deployment: Cloudflare)
 
@@ -121,6 +147,20 @@ intakeai/
 └── PLAN.md                     # Full architecture + decision log
 ```
 
+## 📄 Files (real deployment)
+
+| Path | Role |
+|---|---|
+| `api/worker.js` | Router: businesses/questions/registrations CRUD, AssemblyAI token minting, Telegram initData verification, Telegram bot webhook |
+| `api/checkin-do.js` | `CheckinSession` Durable Object — one per visitor: FSM state, D1 reads/writes, R2 photo storage, Workers AI OCR, webhook delivery |
+| `telegram/webapp/app.js` | Visitor UI logic — camera capture, downscaling, the WebSocket to the Durable Object, and the second WebSocket straight to AssemblyAI |
+| `telegram/webapp/index.html` | Visitor check-in page markup |
+| `telegram/webapp/admin.html` | Admin panel — business/question/voice/webhook config, QR/link generation, registrations list |
+| `schema.sql` | D1 schema: `businesses`, `business_questions`, `guest_registrations` |
+| `seed.sql` | Demo business + questions for a fresh deploy |
+| `wrangler.toml` | Worker + D1 + R2 + Durable Object + Workers AI + observability config |
+| `PLAN.md` | Full architecture write-up and decision log |
+
 ## 🔧 API Endpoints (Cloudflare Worker, `api/worker.js`)
 
 | Endpoint | Method | Auth | Description |
@@ -134,6 +174,7 @@ intakeai/
 | `/api/businesses/:id` | GET/PUT/DELETE | PUT/DELETE: admin | Get/update/delete a business |
 | `/api/businesses/:id/questions` | GET/POST/DELETE | POST/DELETE: admin | Get/replace/clear a business's questions |
 | `/api/businesses/:id/registrations` | GET | admin | List completed check-ins (PII) |
+| `/api/businesses/:id/registrations/:regId` | DELETE | admin | Delete a single registration |
 | `/api/telegram` | POST | — | Telegram bot webhook |
 
 "admin" endpoints require an `X-Telegram-Init-Data` header carrying
@@ -147,8 +188,9 @@ directly to `wss://agents.assemblyai.com/v1/ws` with a token minted by
 `GET /api/token`, then configures the whole conversation per-session via
 `session.update`: the system prompt, greeting, and OCR data (if any) are built
 client-side from what the Durable Object already sent over its own WebSocket,
-and a `submit_answer` (plus, while scanning, `submit_ocr_data`) function tool
-lets the agent report back what the visitor said. The Durable Object never
+and two function tools — `submit_answer` for each questionnaire answer and
+`correct_ocr_field` for fixing a misread ID field — let the agent report back
+what the visitor said. The Durable Object never
 talks to AssemblyAI directly — it only holds the FSM state, D1 reads/writes,
 and runs OCR via Workers AI when a document photo comes in.
 
@@ -172,11 +214,45 @@ curl -X POST https://<your-worker>/api/businesses \
   -H "X-Telegram-Init-Data: <initData from Telegram.WebApp>" \
   -d '{
     "name": "My Business", "business_type": "office",
-    "welcome_message": "Welcome!", "voice_persona": "anna",
+    "welcome_message": "Welcome!",
+    "voice_id": "anna",
+    "voice_persona": "warm and reassuring, speaks slowly",
     "requires_id_scan": true,
+    "webhook_url": "https://your-crm.example.com/webhooks/checkin",
+    "webhook_secret": "a-shared-secret-you-pick",
     "questions": ["First question?", "Second question?"]
   }'
 ```
+
+`voice_id` must be one of AssemblyAI's real catalog IDs (see
+[Voices](https://www.assemblyai.com/docs/voice-agents/voice-agent-api/voices)) —
+it's what actually gets spoken. `voice_persona` is free-text tone/style
+guidance fed into the agent's system prompt; it never selects the TTS voice
+itself. Both `webhook_url` and `webhook_secret` are optional — see below.
+
+## 🔌 Webhook (plug into your existing CRM/PMS)
+
+When a check-in completes, if a business has `webhook_url` set, the Durable
+Object POSTs the visitor's data there — no custom integration needed on
+either side:
+
+```json
+{
+  "event": "checkin.completed",
+  "business_id": "my-business",
+  "business_name": "My Business",
+  "registration_id": "...",
+  "created_at": "2026-09-14T00:00:00.000Z",
+  "answers": { "full_name": "...", "...": "..." },
+  "ocr_data": { "name": "...", "date_of_birth": "...", "...": "..." }
+}
+```
+
+If `webhook_secret` is also set, the request carries an
+`X-Virtualobby-Signature: sha256=<hmac>` header — an HMAC-SHA256 of the raw
+JSON body using that secret — so the receiving system can verify it actually
+came from Virtualobby. Delivery is fire-and-forget and never blocks or fails
+the visitor's check-in; only `https://` URLs are accepted.
 
 ## 🏆 Hackathon: AssemblyAI Voice Agent Hackathon
 
@@ -191,6 +267,36 @@ curl -X POST https://<your-worker>/api/businesses \
 - **Real-world value** — eliminates repetitive reception work
 - **Mobile-first** — works on phone, tablet, and desktop
 - **Telegram integration** — Mini App for zero-friction access
+- **Plugs into what a business already runs** — an optional signed webhook
+  delivers each check-in to any existing CRM/PMS, no custom integration work
+  required on either side
+
+## Honest scope notes
+
+What this is *not*, yet — called out directly rather than left for someone
+to discover:
+
+- **No automated test suite.** Every fix in this repo's history was verified
+  manually against a local `wrangler dev` instance (fabricated Telegram
+  `initData`, a real WebSocket session) or, for client-side bugs, against a
+  headless-browser capture of the live page — not by a CI pipeline.
+- **No PII retention/deletion policy.** Visitor data — scanned ID photos in
+  R2, answers and OCR fields (name, date of birth, ID number) in D1 —
+  persists indefinitely once a check-in completes. `admin.html` can delete a
+  registration one at a time; there's no automatic expiry, export, or
+  right-to-erasure flow.
+- **Single-tier admin auth.** Anyone whose Telegram ID is in
+  `ADMIN_TELEGRAM_IDS` has full write access to every business — no roles,
+  no per-business permissions, no audit log of who changed what.
+- **Webhook delivery has no retry.** A failed or timed-out delivery to a
+  business's `webhook_url` is logged and dropped, not queued or retried.
+- **No per-tenant usage limits.** Every business shares the same
+  AssemblyAI/Workers AI budget; nothing here caps or meters cost per
+  business.
+- **OCR accuracy depends on photo quality and lighting.** The conversational
+  correction flow (`correct_ocr_field`) is the intended fallback for a
+  misread field — there's no confidence threshold or automatic re-scan
+  prompt.
 
 ## 📚 References
 
