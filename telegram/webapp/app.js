@@ -79,7 +79,7 @@ const state = {
     businessId: null, businessName: '', sessionId: null, doWs: null, aaiWs: null,
     captureCtx: null, playbackCtx: null, playback: null, mic: null,
     aaiReady: false, questions: [], answers: {}, ocrData: null,
-    requiresIdScan: false, voiceConnecting: false, pendingToolResults: [],
+    requiresIdScan: false, voiceConnecting: false, pendingToolResults: [], checkinDone: false,
     // True once the DO has moved past scanning (questions_ready received),
     // regardless of whether OCR actually found anything — OCR is best-effort
     // and empty fields is an expected outcome, not a reason to stay in the
@@ -165,12 +165,11 @@ async function init() {
 
 // ── DO WebSocket ───────────────────────────────────────────────────────────
 
-async function connectToDO() {
-    state.sessionId = crypto.randomUUID();
-    const wsUrl = `${CONFIG.API_URL.replace('https://', 'wss://')}/api/ws/${state.sessionId}`;
-    dbg('DO WS URL: ' + wsUrl);
-    state.doWs = new WebSocket(wsUrl);
+const DO_RECONNECT_MAX_ATTEMPTS = 5;
+let doReconnectAttempts = 0;
+let doReconnectTimer = null;
 
+function wireDoWs(isResume) {
     // Timeout: if WebSocket doesn't open in 10s, show error
     const connectTimeout = setTimeout(() => {
         if (state.doWs && state.doWs.readyState !== WebSocket.OPEN) {
@@ -181,11 +180,16 @@ async function connectToDO() {
 
     state.doWs.onopen = () => {
         clearTimeout(connectTimeout);
-        dbg('DO WebSocket OPENED ✓');
-        const startMsg = { type: 'start', business_id: state.businessId };
-        dbg('Sending to DO: ' + JSON.stringify(startMsg));
-        state.doWs.send(JSON.stringify(startMsg));
-        updateStatus('Loading business...');
+        doReconnectAttempts = 0; // back to a clean slate once we're actually connected
+        dbg('DO WebSocket OPENED ✓' + (isResume ? ' (resume)' : ''));
+        // "resume" re-announces wherever the FSM already is without resetting
+        // progress — resending "start" here would force the DO back into
+        // scanning_doc/asking_questions and re-ask for a scan or a question
+        // the visitor already got past.
+        const msg = isResume ? { type: 'resume' } : { type: 'start', business_id: state.businessId };
+        dbg('Sending to DO: ' + JSON.stringify(msg));
+        state.doWs.send(JSON.stringify(msg));
+        updateStatus(isResume ? 'Reconnected' : 'Loading business...');
     };
 
     state.doWs.onmessage = (e) => {
@@ -198,19 +202,49 @@ async function connectToDO() {
         }
     };
 
-    state.doWs.onerror = (err) => {
+    state.doWs.onerror = () => {
         clearTimeout(connectTimeout);
         dbg('DO WebSocket ERROR');
-        updateStatus('Connection error — check network');
     };
 
     state.doWs.onclose = (ev) => {
         clearTimeout(connectTimeout);
         dbg('DO WebSocket CLOSED code=' + ev.code + ' reason=' + (ev.reason || '(none)'));
-        if (ev.code !== 1000 && ev.code !== 1005) {
-            updateStatus('Connection closed: ' + (ev.reason || 'code ' + ev.code));
+        // 1000/1005 are the normal ways this closes (the DO's own 2s-delayed
+        // close after checkin_complete, or a clean client-initiated close) —
+        // never retry those, and never retry once the check-in already
+        // finished. Anything else — most commonly 1006, "abnormal closure",
+        // which is what a flaky mobile connection or a backgrounded tab
+        // produces mid-interview — is worth reconnecting for instead of
+        // leaving the visitor stuck silently on the voice screen.
+        if (ev.code === 1000 || ev.code === 1005 || state.checkinDone) return;
+        if (doReconnectAttempts >= DO_RECONNECT_MAX_ATTEMPTS) {
+            updateStatus('Connection lost — please restart the check-in');
+            return;
         }
+        doReconnectAttempts++;
+        const delay = Math.min(1000 * 2 ** (doReconnectAttempts - 1), 8000);
+        updateStatus(`Connection lost — reconnecting… (${doReconnectAttempts}/${DO_RECONNECT_MAX_ATTEMPTS})`);
+        dbg(`DO reconnect attempt ${doReconnectAttempts} in ${delay}ms`);
+        clearTimeout(doReconnectTimer);
+        doReconnectTimer = setTimeout(reconnectToDO, delay);
     };
+}
+
+async function connectToDO() {
+    state.sessionId = crypto.randomUUID();
+    const wsUrl = `${CONFIG.API_URL.replace('https://', 'wss://')}/api/ws/${state.sessionId}`;
+    dbg('DO WS URL: ' + wsUrl);
+    state.doWs = new WebSocket(wsUrl);
+    wireDoWs(false);
+}
+
+function reconnectToDO() {
+    if (!state.sessionId || state.checkinDone) return;
+    const wsUrl = `${CONFIG.API_URL.replace('https://', 'wss://')}/api/ws/${state.sessionId}`;
+    dbg('DO WS reconnect URL: ' + wsUrl);
+    state.doWs = new WebSocket(wsUrl);
+    wireDoWs(true);
 }
 
 function handleDOMessage(msg) {
@@ -615,6 +649,14 @@ function queueToolResult(msg) {
             if (state.doWs?.readyState === 1) state.doWs.send(JSON.stringify({ type: 'ocr_correction', field, value }));
         }
         state.pendingToolResults.push({ call_id: msg.call_id, result: JSON.stringify({ success: ok }) });
+    } else if (msg.name === 'confirm_registration') {
+        // The only thing that actually finalizes a check-in — without this,
+        // guest_registrations never gets a row and the visitor is stuck on
+        // the voice screen forever, since checkin_complete (which drives
+        // showDone()) is only ever sent in reply to this.
+        dbg('Tool call confirm_registration');
+        if (state.doWs?.readyState === 1) state.doWs.send(JSON.stringify({ type: 'confirm' }));
+        state.pendingToolResults.push({ call_id: msg.call_id, result: JSON.stringify({ success: true }) });
     } else {
         dbg('Unhandled tool.call: ' + msg.name);
         state.pendingToolResults.push({ call_id: msg.call_id, result: JSON.stringify({ success: false, error: 'unknown tool' }) });
@@ -694,14 +736,15 @@ ${questionsList}
 FLOW:
 ${ocrSection ? '1. Do STEP 1 (confirm ID scan) first\n2. Then STEP 2' : '1. Start with STEP 2'}
 - For each question: ask it, wait for the answer, confirm briefly ("Got it", "Understood", "Perfect"), then call submit_answer with their answer, then move to the next question
-- After all questions, summarize everything and ask "Is everything correct?"
+- After all questions, summarize everything and ask "Is everything correct?" Once the visitor says yes, call confirm_registration — this is the ONLY way the check-in actually finishes, so never skip it. If they say something is wrong instead, fix it (submit_answer again for a numbered question, or correct_ocr_field for ID data), then summarize and ask again.
 
 RULES:
 - Speak in the visitor's language
 - Keep sentences short — this is voice
 - Never generate your own questions
 - submit_answer is ONLY for the numbered questions in STEP 2 — never for the ID scan confirmation
-- correct_ocr_field is ONLY for fixing wrong ID scan data — call it as soon as the visitor states a correction, never skip this step`;
+- correct_ocr_field is ONLY for fixing wrong ID scan data — call it as soon as the visitor states a correction, never skip this step
+- confirm_registration is ONLY called once, after the visitor confirms the final summary is correct — never before`;
 }
 
 function buildInterviewTools() {
@@ -724,6 +767,12 @@ function buildInterviewTools() {
                 },
                 required: ['field', 'value'],
             },
+        },
+        {
+            type: 'function',
+            name: 'confirm_registration',
+            description: 'Call this once, after reading back the full summary and the visitor confirms everything is correct. This actually finalizes the check-in — without it, the registration is never saved.',
+            parameters: { type: 'object', properties: {}, required: [] },
         },
     ];
 }
@@ -815,6 +864,7 @@ function showSummary(answers, ocr) {
 }
 
 function showDone(registrationId) {
+    state.checkinDone = true; // stop the DO WS reconnect loop from firing after a normal finish
     updateStatus('Check-in complete'); showStep('confirm');
     if (elements.confirmMessage) elements.confirmMessage.textContent = 'Your check-in is complete!';
     if (elements.confirmId) elements.confirmId.textContent = `Registration ID: ${registrationId}`;

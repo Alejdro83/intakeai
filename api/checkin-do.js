@@ -114,6 +114,7 @@ export class CheckinSession {
         case "id_uploaded": return await this._handleIdUploaded(ws, data);
         case "ocr_correction": return await this._handleOcrCorrection(ws, data);
         case "confirm": return await this._handleConfirm(ws);
+        case "resume": return await this._handleResume(ws);
         default: return this._error(ws, `Unknown message type: ${data.type}`);
       }
     } catch (err) {
@@ -195,6 +196,47 @@ export class CheckinSession {
     }
 
     await this._saveSession();
+  }
+
+  /**
+   * Re-announces wherever the FSM already is, for a client that reconnected
+   * (e.g. after a dropped WebSocket) to the same session URL — never resets
+   * progress the way re-sending "start" would (it forces fsmState back to
+   * scanning_doc/asking_questions unconditionally, which would re-request a
+   * scan or a question the visitor already got past).
+   */
+  async _handleResume(ws) {
+    if (!this.session.businessId) {
+      return this._error(ws, "No active session to resume");
+    }
+    switch (this.session.fsmState) {
+      case "scanning_doc":
+        this._send(ws, { type: "request_camera", text: "Please scan your ID document" });
+        break;
+      case "asking_questions":
+        this._sendCurrentQuestion(ws);
+        break;
+      case "confirming":
+        this._goToConfirming(ws);
+        break;
+      case "done":
+        this._send(ws, { type: "checkin_complete", registration_id: this.session.lastRegistrationId || null });
+        break;
+      default: {
+        const bizName = this.session.businessConfig?.name || "our office";
+        this._send(ws, {
+          type: "welcome",
+          welcome_message: this.session.businessConfig?.welcome_message || `Welcome to ${bizName}!`,
+          business_name: bizName,
+          voice_id: this.session.businessConfig?.voice_id || "anna",
+          voice_persona: this.session.businessConfig?.voice_persona || "",
+          questions: this.session.questions.map(q => ({
+            id: q.id, text: q.question_text, type: q.validation_type, field: q.field_key,
+          })),
+          requires_id_scan: this.session.businessConfig?.requires_id_scan,
+        });
+      }
+    }
   }
 
   /* ------------------------------------------------------------------ */
@@ -386,6 +428,7 @@ export class CheckinSession {
     }
 
     this.session.fsmState = "done";
+    this.session.lastRegistrationId = registrationId; // so a reconnect-resume can report it too
     this._send(ws, { type: "checkin_complete", registration_id: registrationId });
     await this._saveSession();
 
