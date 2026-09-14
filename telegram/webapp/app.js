@@ -12,14 +12,19 @@ const CONFIG = {
 
 const WIRE_RATE = 24_000;
 
-// AssemblyAI's defaults (vad_threshold 0.5, no interruption_delay) are quick
-// to treat any ambient sound as a barge-in — and once interrupted, the reply
-// is simply gone (no resume), so the agent re-decides what to say next,
-// which shows up as it re-asking the same question. Per AssemblyAI docs,
-// raising these two reduces false-positive interruptions from background
-// noise while still letting genuine speech interrupt; min_silence/max_silence
-// are deliberately left unset (adaptive end-of-turn timing).
-const TURN_DETECTION = { vad_threshold: 0.65, interruption_delay: 600 };
+// AssemblyAI's defaults (vad_threshold 0.5, barge-in enabled) are quick to
+// treat any ambient sound as an interruption — and once interrupted, the
+// reply is simply gone (no resume), so the agent re-decides what to say
+// next, which shows up as it re-asking the same question. vad_threshold is
+// still raised for turn-taking accuracy in general, but the actual fix for
+// noise-triggered interruptions is interrupt_response: false — the agent
+// finishes speaking no matter what it hears, full stop. Its replies here
+// are short (one question, one summary line), so the visitor waiting for it
+// to finish costs little, and it's a full disable rather than a threshold
+// tweak (verified live against AssemblyAI's API: accepted, reaches
+// session.ready). min_silence/max_silence are deliberately left unset
+// (adaptive end-of-turn timing).
+const TURN_DETECTION = { vad_threshold: 0.65, interruption_delay: 600, interrupt_response: false };
 
 // ── Debug Log (visible in UI) ────────────────────────────────────────────
 
