@@ -1,5 +1,5 @@
 -- Virtualobby D1 Schema v2
--- 3 tables: businesses, business_questions, guest_registrations
+-- 4 tables: businesses, business_questions, guest_registrations, token_rate_limits
 
 CREATE TABLE IF NOT EXISTS businesses (
   id TEXT PRIMARY KEY,
@@ -46,4 +46,16 @@ CREATE TABLE IF NOT EXISTS guest_registrations (
   status TEXT DEFAULT 'completed',
   created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
   FOREIGN KEY (business_id) REFERENCES businesses(id)
+);
+
+-- Backs the /api/token rate limiter. One row per IP ever seen; D1 serializes
+-- writes to the same row, so the upsert in worker.js is a real cross-request
+-- limit (unlike an in-memory Map, which is per-isolate and doesn't hold up
+-- under real concurrent load — verified: 12 truly simultaneous requests from
+-- one IP all got through it). No cleanup job for stale rows yet — fine at
+-- this scale, would need one if the IP set grows large over time.
+CREATE TABLE IF NOT EXISTS token_rate_limits (
+  ip TEXT PRIMARY KEY,
+  count INTEGER NOT NULL DEFAULT 0,
+  reset_at INTEGER NOT NULL
 );

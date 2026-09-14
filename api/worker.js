@@ -167,16 +167,24 @@ async function handleTelegramUpdate(update, env) {
 
 // ── URL Router ────────────────────────────────────────────────────────────
 
-// Simple in-memory rate limiter for token endpoint (best-effort, resets on isolate restart)
-const _tokenHits = new Map();
-function checkTokenRateLimit(ip, maxPerMinute = 10) {
+// Rate limiter for the token endpoint, backed by D1 rather than an
+// in-memory Map. A module-level Map is per-isolate — under real concurrent
+// load Cloudflare spreads requests across multiple isolates, each with its
+// own separate copy, so the limit was never actually enforced (verified:
+// 12 truly concurrent requests from one IP all got through). D1 serializes
+// writes to the same row, so this single atomic upsert is a real limiter
+// regardless of how many isolates are handling requests at once.
+async function checkTokenRateLimit(env, ip, maxPerMinute = 10) {
   const now = Date.now();
-  const entry = _tokenHits.get(ip) || { count: 0, resetAt: now + 60000 };
-  if (now > entry.resetAt) { entry.count = 0; entry.resetAt = now + 60000; }
-  if (entry.count >= maxPerMinute) return false;
-  entry.count++;
-  _tokenHits.set(ip, entry);
-  return true;
+  const resetAt = now + 60000;
+  const row = await env.DB.prepare(
+    `INSERT INTO token_rate_limits (ip, count, reset_at) VALUES (?, 1, ?)
+     ON CONFLICT(ip) DO UPDATE SET
+       count = CASE WHEN reset_at < ? THEN 1 ELSE count + 1 END,
+       reset_at = CASE WHEN reset_at < ? THEN ? ELSE reset_at END
+     RETURNING count`
+  ).bind(ip, resetAt, now, now, resetAt).first();
+  return (row?.count ?? 1) <= maxPerMinute;
 }
 
 export default {
@@ -209,7 +217,7 @@ export default {
     // ── AssemblyAI session token ──
     if (path === '/api/token' && method === 'GET') {
       const _clientIp = request.headers.get('CF-Connecting-IP') || 'unknown';
-      if (!checkTokenRateLimit(_clientIp)) {
+      if (!(await checkTokenRateLimit(env, _clientIp))) {
         return jsonResponse({ error: 'Rate limit exceeded. Try again in a minute.' }, 429);
       }
       try {
