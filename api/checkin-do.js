@@ -185,7 +185,12 @@ export class CheckinSession {
       this._send(ws, { type: "request_camera", text: "Please scan your ID document" });
     } else {
       this.session.fsmState = "asking_questions";
-      this._sendQuestionsReady(ws);
+      // No questions_ready here: that message means "a scan attempt just
+      // finished" and makes the client run its post-scan interview handoff
+      // (which assumes OCR was attempted and apologizes if it found nothing).
+      // With scanning disabled there was never a scan to report on — the
+      // welcome message already gave the client everything it needs, and
+      // connectToAssemblyAI() goes straight into the interview prompt.
       this._sendCurrentQuestion(ws);
     }
 

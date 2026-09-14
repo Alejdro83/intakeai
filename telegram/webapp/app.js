@@ -100,6 +100,7 @@ const elements = {
     stepScan: $('step-scan'), stepVoice: $('step-voice'), stepConfirm: $('step-confirm'),
     ocrResult: $('ocr-result'), ocrFields: $('ocr-fields'), ocrLoading: $('ocr-loading'),
     scanActions: $('scan-actions'), transcriptMessages: $('transcript-messages'),
+    transcriptScroll: $('transcript-scroll'),
     statusDot: $('status-dot'), statusText: $('status-text'),
     btnNewVisitor: $('btn-new-visitor'), confirmMessage: $('confirm-message'), confirmId: $('confirm-id'),
 };
@@ -123,7 +124,12 @@ function addMessage(who, text) {
     if (!elements.transcriptMessages) return;
     const div = document.createElement('div'); div.className = `message ${who}`; div.textContent = text;
     elements.transcriptMessages.appendChild(div);
-    elements.transcriptMessages.scrollTop = elements.transcriptMessages.scrollHeight;
+    // The scrollable element is .transcript (the wrapper), not
+    // .transcript-messages itself — that one has no overflow/fixed height,
+    // so setting its own scrollTop was always a no-op and the page never
+    // auto-scrolled as new messages came in.
+    const scroller = elements.transcriptScroll;
+    if (scroller) scroller.scrollTop = scroller.scrollHeight;
 }
 
 // ── Init ───────────────────────────────────────────────────────────────────
