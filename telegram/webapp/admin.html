@@ -680,7 +680,7 @@
         
         async function loadBusinesses() {
             try {
-                const res = await fetch(API + '/api/businesses');
+                const res = await fetch(API + '/api/businesses', { headers: authHeaders() });
                 if (res.ok) {
                     const data = await res.json();
                     businesses = data.businesses || data.lobbies || data || [];
@@ -771,7 +771,7 @@
             // Load questions
             detailQuestions = biz.questions || [];
             try {
-                const res = await fetch(`${API}/api/businesses/${id}/questions`);
+                const res = await fetch(`${API}/api/businesses/${id}/questions`, { headers: authHeaders() });
                 if (res.ok) {
                     const data = await res.json();
                     detailQuestions = data.questions || data || [];
@@ -1029,7 +1029,19 @@
         }
         
         // ── Submissions ───────────────────────────────────────────
-        
+
+        // Confirmed bug (external review, 2026-09): visitor-supplied text
+        // (spoken answers, OCR fields) went straight into innerHTML with no
+        // escaping — a visitor who dictated or typed HTML/script could
+        // execute it in the admin's own session the next time this table
+        // was opened. Every piece of visitor-controlled text below must go
+        // through this before landing in an HTML template string.
+        function escapeHtml(str) {
+            return String(str ?? '').replace(/[&<>"']/g, (c) => ({
+                '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+            }[c]));
+        }
+
         async function loadSubmissions() {
             renderSubmissionsBizSelect();
             const content = document.getElementById('submissions-content');
@@ -1044,7 +1056,7 @@
             try {
                 const [regRes, qRes] = await Promise.all([
                     fetch(`${API}/api/businesses/${selectedBizId}/registrations`, { headers: authHeaders() }),
-                    fetch(`${API}/api/businesses/${selectedBizId}/questions`),
+                    fetch(`${API}/api/businesses/${selectedBizId}/questions`, { headers: authHeaders() }),
                 ]);
                 if (!regRes.ok) throw new Error('HTTP ' + regRes.status);
                 const data = await regRes.json();
@@ -1068,15 +1080,15 @@
                 subs.forEach(s => {
                     const answers = s.answers || {};
                     const answersHtml = Object.entries(answers)
-                        .map(([qId, ans]) => `<b>${questionText[qId] || qId}:</b> ${ans}`)
+                        .map(([qId, ans]) => `<b>${escapeHtml(questionText[qId] || qId)}:</b> ${escapeHtml(ans)}`)
                         .join('<br>') || '—';
                     const docs = s.documents || [];
                     const docsHtml = docs.length
                         ? docs.map((d, i) => `<a href="javascript:void(0)" onclick="viewDocument('${selectedBizId}','${s.id}',${i})">📎 ${i + 1}</a>`).join(' ')
                         : '—';
                     html += `<tr>
-                        <td>${s.ocr?.name || '—'}</td>
-                        <td>${s.ocr?.id_number || '—'}</td>
+                        <td>${escapeHtml(s.ocr?.name) || '—'}</td>
+                        <td>${escapeHtml(s.ocr?.id_number) || '—'}</td>
                         <td style="max-width:320px;">${answersHtml}</td>
                         <td>${docsHtml}</td>
                         <td>${s.status || 'completed'}</td>

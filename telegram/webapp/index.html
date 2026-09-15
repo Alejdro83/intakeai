@@ -25,6 +25,19 @@
     </header>
 
     <main class="main">
+        <!-- Gate: nothing else starts until this tap. Browsers only allow
+             audio (AudioContext + mic) to activate from inside a real user
+             gesture's call stack — starting it later from an async WebSocket
+             callback leaves it silently stuck "suspended" forever, which is
+             exactly what happened before this screen existed. -->
+        <section class="step" id="step-start">
+            <div class="step-header"><h2>🎙️ Voice Check-in</h2></div>
+            <p class="step-description">Tap below to start — we'll ask for microphone access to talk with you.</p>
+            <div class="scan-actions">
+                <button class="btn btn-primary btn-scan-main" id="btn-start">🎤 Tap to Start</button>
+            </div>
+        </section>
+
         <!-- Step 1: Scan ID -->
         <section class="step hidden" id="step-scan">
             <div class="step-header"><span class="step-number">1</span><h2>Identity Verification</h2></div>

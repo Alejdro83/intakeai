@@ -103,6 +103,7 @@ const state = {
 
 const $ = (id) => document.getElementById(id) || document.querySelector(`.${id}`);
 const elements = {
+    stepStart: $('step-start'), btnStart: $('btn-start'),
     stepScan: $('step-scan'), stepVoice: $('step-voice'), stepConfirm: $('step-confirm'),
     stepDocuments: $('step-documents'),
     summaryActions: $('summary-actions'), btnConfirmSummary: $('btn-confirm-summary'),
@@ -168,9 +169,68 @@ async function init() {
     initTelegram();
     if (!state.businessId) { state.businessId = 'clinic-main'; dbg('Using default businessId: clinic-main'); }
     initEventListeners();
+    // Deliberately does NOT connect to anything yet. Browsers only let an
+    // AudioContext actually activate (and getUserMedia behaves best) inside
+    // the call stack of a real user gesture — starting everything here, on
+    // page load, left audio stuck "suspended" forever with no visible error
+    // (confirmed via a real browser test). Everything below waits for the
+    // visitor to tap Start.
+    elements.btnStart?.addEventListener('click', startCheckin, { once: true });
+}
+
+async function startCheckin() {
+    if (elements.btnStart) { elements.btnStart.disabled = true; elements.btnStart.textContent = 'Starting…'; }
+    dbg('Start tapped — priming audio from the user gesture');
+    try {
+        await primeAudio();
+    } catch (err) {
+        dbg('Audio priming failed: ' + err.message);
+        updateStatus('Microphone/audio failed: ' + err.message);
+        if (elements.btnStart) {
+            elements.btnStart.disabled = false;
+            elements.btnStart.textContent = '🎤 Tap to Start';
+            elements.btnStart.addEventListener('click', startCheckin, { once: true });
+        }
+        return;
+    }
+    elements.stepStart?.classList.add('hidden');
     updateStatus('Connecting...');
     dbg('Calling connectToDO()...');
     await connectToDO();
+}
+
+// Creates and activates the audio pipeline (AudioContexts + mic permission)
+// synchronously enough within the Start tap's call stack to satisfy browser
+// autoplay policy — connectToAssemblyAI() reuses what this sets up instead
+// of creating its own from an async WebSocket callback, which is what
+// caused captureCtx/playbackCtx to stay stuck "suspended" before.
+async function primeAudio() {
+    dbg('Creating AudioContexts at ' + WIRE_RATE + ' Hz (from user gesture)...');
+    state.captureCtx = new AudioContext({ sampleRate: WIRE_RATE });
+    state.playbackCtx = new AudioContext({ sampleRate: WIRE_RATE });
+    dbg('captureCtx.state=' + state.captureCtx.state + ' playbackCtx.state=' + state.playbackCtx.state);
+
+    await state.captureCtx.resume();
+    await state.playbackCtx.resume();
+    dbg('After resume: capture=' + state.captureCtx.state + ' playback=' + state.playbackCtx.state);
+
+    updateStatus('Requesting microphone...');
+    try {
+        dbg('Calling getUserMedia...');
+        const stream = await Promise.race([
+            navigator.mediaDevices.getUserMedia({
+                audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+            }),
+            new Promise((_, reject) => setTimeout(() => reject(new Error('Mic permission timeout (10s)')), 10000)),
+        ]);
+        dbg('getUserMedia OK, tracks=' + stream.getAudioTracks().length);
+        state.mic = stream;
+    } catch (micErr) {
+        dbg('MIC FAILED: ' + micErr.message);
+        state.captureCtx?.close(); state.playbackCtx?.close();
+        state.captureCtx = state.playbackCtx = null;
+        throw new Error('Microphone access failed: ' + micErr.message);
+    }
 }
 
 // ── DO WebSocket ───────────────────────────────────────────────────────────
@@ -241,12 +301,32 @@ function wireDoWs(isResume) {
     };
 }
 
+// Persisted only in sessionStorage — cleared when the tab/browser closes,
+// never synced anywhere, and holds nothing but a random UUID (no answers,
+// no document data, nothing sensitive) — just enough to tell a genuine page
+// reload apart from a brand-new visitor, so a reload can resume progress
+// instead of restarting the whole interview (confirmed gap, external
+// review 2026-09: reloading always generated a fresh id here).
+const SESSION_STORAGE_KEY = 'vobb_session_id';
+
 async function connectToDO() {
-    state.sessionId = crypto.randomUUID();
+    let isResume = false;
+    try {
+        const stored = sessionStorage.getItem(SESSION_STORAGE_KEY);
+        if (stored) {
+            state.sessionId = stored;
+            isResume = true;
+        } else {
+            state.sessionId = crypto.randomUUID();
+            sessionStorage.setItem(SESSION_STORAGE_KEY, state.sessionId);
+        }
+    } catch (_) {
+        state.sessionId = crypto.randomUUID(); // sessionStorage unavailable (private mode, etc.)
+    }
     const wsUrl = `${CONFIG.API_URL.replace('https://', 'wss://')}/api/ws/${state.sessionId}`;
-    dbg('DO WS URL: ' + wsUrl);
+    dbg('DO WS URL: ' + wsUrl + (isResume ? ' (resuming after reload)' : ''));
     state.doWs = new WebSocket(wsUrl);
-    wireDoWs(false);
+    wireDoWs(isResume);
 }
 
 function reconnectToDO() {
@@ -322,6 +402,17 @@ function handleDOMessage(msg) {
 
         case 'error':
             dbg('DO ERROR: ' + msg.message);
+            // A resume attempt against a stored sessionId whose DO session
+            // already expired/was wiped (the 10-minute alarm, or just never
+            // existed) — the stored id is now useless, so drop it and start
+            // clean instead of getting stuck on a permanent error.
+            if (msg.message === 'No active session to resume') {
+                dbg('Stored session is gone — clearing it and starting fresh');
+                try { sessionStorage.removeItem(SESSION_STORAGE_KEY); } catch (_) {}
+                state.doWs?.close(); state.doWs = null;
+                connectToDO();
+                break;
+            }
             updateStatus('Error: ' + msg.message);
             break;
 
@@ -449,35 +540,16 @@ async function connectToAssemblyAI() {
         throw new Error('Token fetch failed: ' + e.message);
     }
 
-    // 2. Set up audio
-    dbg('Creating AudioContexts at ' + WIRE_RATE + ' Hz...');
-    state.captureCtx = new AudioContext({ sampleRate: WIRE_RATE });
-    state.playbackCtx = new AudioContext({ sampleRate: WIRE_RATE });
-    dbg('captureCtx.state=' + state.captureCtx.state + ' playbackCtx.state=' + state.playbackCtx.state);
-
-    await state.captureCtx.resume();
-    await state.playbackCtx.resume();
-    dbg('After resume: capture=' + state.captureCtx.state + ' playback=' + state.playbackCtx.state);
-
-    updateStatus('Requesting microphone...');
-    let stream;
-    try {
-        dbg('Calling getUserMedia...');
-        stream = await Promise.race([
-            navigator.mediaDevices.getUserMedia({
-                audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true },
-            }),
-            new Promise((_, reject) => setTimeout(() => reject(new Error('Mic permission timeout (10s)')), 10000)),
-        ]);
-        dbg('getUserMedia OK, tracks=' + stream.getAudioTracks().length);
-    } catch (micErr) {
-        dbg('MIC FAILED: ' + micErr.message);
+    // 2. Reuse the audio primeAudio() already created + activated from the
+    // Start button's user gesture. Creating it here instead (async, off any
+    // gesture) is exactly what left captureCtx/playbackCtx stuck "suspended"
+    // forever before this existed.
+    if (!state.captureCtx || !state.playbackCtx || !state.mic) {
         state.voiceConnecting = false;
-        state.captureCtx?.close(); state.playbackCtx?.close();
-        state.captureCtx = state.playbackCtx = null;
-        throw new Error('Microphone access failed: ' + micErr.message);
+        throw new Error('Audio was not primed — tap Start first');
     }
-    state.mic = stream;
+    const stream = state.mic;
+    dbg('Reusing primed audio: capture=' + state.captureCtx.state + ' playback=' + state.playbackCtx.state);
 
     dbg('Setting up capture worklet...');
     const source = state.captureCtx.createMediaStreamSource(stream);
@@ -648,10 +720,21 @@ function handleAAILogic(msg) {
 
 function queueToolResult(msg) {
     if (msg.name === 'submit_answer') {
+        const field = msg.arguments?.field || '';
         const answer = msg.arguments?.answer || '';
-        dbg('Tool call queued submit_answer: ' + answer);
-        if (state.doWs?.readyState === 1) state.doWs.send(JSON.stringify({ type: 'user_transcript', text: answer }));
-        state.pendingToolResults.push({ call_id: msg.call_id, result: JSON.stringify({ success: true }) });
+        dbg('Tool call queued submit_answer: field=' + field + ' answer=' + answer);
+        // Confirmed bug (external review, 2026-09): this used to report
+        // success:true unconditionally, even with the DO socket closed — the
+        // agent would believe an answer (or, worse, the final confirmation)
+        // was saved when nothing reached the server at all. A real ack from
+        // the DO after it persists is the complete fix; this at least stops
+        // lying about it when we can see outright that delivery failed.
+        const delivered = state.doWs?.readyState === 1;
+        if (delivered) state.doWs.send(JSON.stringify({ type: 'user_transcript', text: answer, field }));
+        state.pendingToolResults.push({
+            call_id: msg.call_id,
+            result: JSON.stringify(delivered ? { success: true } : { success: false, error: 'not connected to server — try again' }),
+        });
     } else if (msg.name === 'correct_ocr_field') {
         // Without this, a spoken correction only ever lived in the LLM's own
         // conversation memory — it would say the fix back correctly, but the
@@ -660,21 +743,29 @@ function queueToolResult(msg) {
         const field = msg.arguments?.field;
         const value = msg.arguments?.value;
         dbg('Tool call correct_ocr_field: ' + field + ' = ' + value);
-        const ok = !!(field && value);
-        if (ok) {
+        const validArgs = !!(field && value);
+        const delivered = validArgs && state.doWs?.readyState === 1;
+        if (delivered) {
             state.ocrData = { ...(state.ocrData || {}), [field]: value };
             displayOCRResult(state.ocrData);
-            if (state.doWs?.readyState === 1) state.doWs.send(JSON.stringify({ type: 'ocr_correction', field, value }));
+            state.doWs.send(JSON.stringify({ type: 'ocr_correction', field, value }));
         }
-        state.pendingToolResults.push({ call_id: msg.call_id, result: JSON.stringify({ success: ok }) });
+        state.pendingToolResults.push({
+            call_id: msg.call_id,
+            result: JSON.stringify(delivered ? { success: true } : { success: false, error: validArgs ? 'not connected to server — try again' : 'missing field or value' }),
+        });
     } else if (msg.name === 'confirm_registration') {
         // The only thing that actually finalizes a check-in — without this,
         // guest_registrations never gets a row and the visitor is stuck on
         // the voice screen forever, since checkin_complete (which drives
         // showDone()) is only ever sent in reply to this.
         dbg('Tool call confirm_registration');
-        if (state.doWs?.readyState === 1) state.doWs.send(JSON.stringify({ type: 'confirm' }));
-        state.pendingToolResults.push({ call_id: msg.call_id, result: JSON.stringify({ success: true }) });
+        const delivered = state.doWs?.readyState === 1;
+        if (delivered) state.doWs.send(JSON.stringify({ type: 'confirm' }));
+        state.pendingToolResults.push({
+            call_id: msg.call_id,
+            result: JSON.stringify(delivered ? { success: true } : { success: false, error: 'not connected to server — try again' }),
+        });
     } else {
         dbg('Unhandled tool.call: ' + msg.name);
         state.pendingToolResults.push({ call_id: msg.call_id, result: JSON.stringify({ success: false, error: 'unknown tool' }) });
@@ -753,13 +844,14 @@ ${questionsList}
 
 FLOW:
 ${ocrSection ? '1. Do STEP 1 (confirm ID scan) first\n2. Then STEP 2' : '1. Start with STEP 2'}
-- For each question: ask it, wait for the answer, confirm briefly ("Got it", "Understood", "Perfect"), then call submit_answer with their answer, then move to the next question
-- After all questions, summarize everything and ask "Is everything correct?" Once the visitor says yes, call confirm_registration — this is the ONLY way the check-in actually finishes, so never skip it. If they say something is wrong instead, fix it (submit_answer again for a numbered question, or correct_ocr_field for ID data), then summarize and ask again.
+- For each question: ask it, wait for the answer, confirm briefly ("Got it", "Understood", "Perfect"), then call submit_answer with that question's field and their answer, then move to the next question
+- After all questions, summarize everything and ask "Is everything correct?" Once the visitor says yes, call confirm_registration — this is the ONLY way the check-in actually finishes, so never skip it. If they say a numbered answer is wrong instead — even after hearing the summary — call submit_answer again with that question's field and the corrected value (this replaces the old answer, it does not add a new one), then summarize again and ask once more. Use correct_ocr_field only for ID scan data, never for a numbered question.
 
 RULES:
 - Speak in the visitor's language
 - Keep sentences short — this is voice
 - Never generate your own questions
+- submit_answer ALWAYS needs the field of the question being answered or corrected — never assume the server can infer which one from order alone
 - submit_answer is ONLY for the numbered questions in STEP 2 — never for the ID scan confirmation
 - correct_ocr_field is ONLY for fixing wrong ID scan data — call it as soon as the visitor states a correction, never skip this step
 - confirm_registration is ONLY called once, after the visitor confirms the final summary is correct — never before`;
@@ -770,8 +862,15 @@ function buildInterviewTools() {
         {
             type: 'function',
             name: 'submit_answer',
-            description: 'Submit the visitor answer for the current numbered question. Do not use this for the ID scan confirmation step.',
-            parameters: { type: 'object', properties: { answer: { type: 'string' } }, required: ['answer'] },
+            description: 'Submit the visitor\'s answer for a numbered question, identified by its field key. Also use this to CORRECT an earlier answer if the visitor asks to change one — even after the summary — by calling it again with that question\'s field and the new value. Do not use this for the ID scan confirmation step.',
+            parameters: {
+                type: 'object',
+                properties: {
+                    field: { type: 'string', description: 'The field key of the question being answered or corrected, exactly as given in the numbered list (e.g. "date_of_birth")' },
+                    answer: { type: 'string' },
+                },
+                required: ['field', 'answer'],
+            },
         },
         {
             type: 'function',
@@ -912,7 +1011,13 @@ function displayOCRResult(fields) {
     for (const [k, v] of Object.entries(fields || {})) {
         if (!v) continue;
         const r = document.createElement('div'); r.className = 'field-row';
-        r.innerHTML = `<span class="field-label">${labels[k] || k}</span><span class="field-value">${v}</span>`;
+        // Built with textContent, not innerHTML — v comes from the vision
+        // model's OCR read of the document (and can be overwritten by
+        // correct_ocr_field from whatever the visitor says), so it must
+        // never be treated as markup.
+        const label = document.createElement('span'); label.className = 'field-label'; label.textContent = labels[k] || k;
+        const value = document.createElement('span'); value.className = 'field-value'; value.textContent = v;
+        r.appendChild(label); r.appendChild(value);
         c.appendChild(r);
     }
     elements.ocrResult?.classList.remove('hidden');
@@ -939,6 +1044,9 @@ function hideSummaryActions() {
 
 function showDone(registrationId) {
     state.checkinDone = true; // stop the DO WS reconnect loop from firing after a normal finish
+    // This visitor's session is finished — a later reload or the next
+    // visitor on this device must never resume into a completed check-in.
+    try { sessionStorage.removeItem(SESSION_STORAGE_KEY); } catch (_) {}
     hideSummaryActions();
     updateStatus('Check-in complete'); showStep('confirm');
     if (elements.confirmMessage) elements.confirmMessage.textContent = 'Your check-in is complete!';
@@ -999,12 +1107,28 @@ function initEventListeners() {
         // from the previous visitor's finished session.
         state.scanCompleted = false; state.pendingInterviewHandoff = false; state.requiresIdScan = false;
         state.documentsUploadedCount = 0;
+        // Confirmed bug (external review, 2026-09): this was never reset, so
+        // the SECOND visitor on the same device inherited the first one's
+        // "done" flag — if their DO WebSocket ever dropped mid-interview,
+        // the reconnect guard saw checkinDone=true (stale) and silently gave
+        // up instead of reconnecting.
+        state.checkinDone = false;
         if (elements.btnDocumentsContinue) { elements.btnDocumentsContinue.textContent = '➡️ Continue without uploading'; elements.btnDocumentsContinue.disabled = false; }
         if (elements.documentsUploadedCount) elements.documentsUploadedCount.classList.add('hidden');
         if (elements.btnConfirmSummary) elements.btnConfirmSummary.disabled = false;
         hideSummaryActions();
         if (elements.transcriptMessages) elements.transcriptMessages.innerHTML = '';
-        cleanupAudio(); if (state.doWs) { state.doWs.close(); state.doWs = null; } connectToDO();
+        cleanupAudio(); if (state.doWs) { state.doWs.close(); state.doWs = null; }
+        // cleanupAudio() just tore down the AudioContexts/mic stream — the
+        // NEXT visitor needs their own real tap to reactivate audio, same
+        // reason the very first visitor needs step-start. Auto-reconnecting
+        // here would hit the exact "stuck suspended" bug this screen fixes.
+        elements.stepStart?.classList.remove('hidden');
+        if (elements.btnStart) {
+            elements.btnStart.disabled = false;
+            elements.btnStart.textContent = '🎤 Tap to Start';
+            elements.btnStart.addEventListener('click', startCheckin, { once: true });
+        }
     });
     window.addEventListener('beforeunload', () => { cleanupAudio(); state.doWs?.close(); });
 }

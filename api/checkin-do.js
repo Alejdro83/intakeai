@@ -19,7 +19,7 @@ export class CheckinSession {
   constructor(state, env) {
     this.state = state;
     this.env = env;
-    this.session = null; // loaded async in webSocketOpen
+    this.session = null; // loaded async in fetch(), on the WS upgrade
   }
 
   _freshSession() {
@@ -60,6 +60,16 @@ export class CheckinSession {
       const pair = new WebSocketPair();
       const [client, server] = Object.values(pair);
       this.state.acceptWebSocket(server);
+      // Confirmed bug (external review, 2026-09): this used to live in a
+      // webSocketOpen(ws) method, which looks like it should be part of the
+      // Hibernation WebSocket API but isn't — Cloudflare's docs only define
+      // webSocketMessage/webSocketClose/webSocketError, so that method was
+      // simply never called. The alarm that's supposed to wipe an
+      // abandoned session after 10 minutes never got scheduled, ever.
+      await this._loadSession();
+      this.session.startedAt = Date.now();
+      await this._saveSession();
+      try { await this.state.storage.setAlarm(Date.now() + 10 * 60 * 1000); } catch (_) {}
       return new Response(null, { status: 101, webSocket: client });
     }
     if (request.method === "PUT") {
@@ -99,18 +109,19 @@ export class CheckinSession {
     if (!isIdScan) {
       this.session.additionalDocs = this.session.additionalDocs || [];
       this.session.additionalDocs.push({ r2_key: key, content_type: contentType });
-      await this._saveSession();
+    } else {
+      // Confirmed bug (external review, 2026-09): _handleIdUploaded used to
+      // trust whatever r2_key the client sent in its next WS message with
+      // no check at all — checking fsmState only proves this session is
+      // AT the scanning step, not that the key it names was ever issued to
+      // it. Recording the one real key this upload just created, and
+      // requiring an exact match later, closes that.
+      this.session.pendingIdUpload = key;
     }
+    await this._saveSession();
     return new Response(JSON.stringify({ ok: true, r2_key: key }), {
       headers: { "Content-Type": "application/json" },
     });
-  }
-
-  async webSocketOpen(ws) {
-    await this._loadSession();
-    this.session.startedAt = Date.now();
-    await this._saveSession();
-    try { await this.state.storage.setAlarm(Date.now() + 10 * 60 * 1000); } catch (_) {}
   }
 
   async webSocketMessage(ws, message) {
@@ -266,6 +277,10 @@ export class CheckinSession {
 
     const r2Key = data.r2_key;
     if (!r2Key) return this._error(ws, "Missing r2_key");
+    if (r2Key !== this.session.pendingIdUpload) {
+      return this._error(ws, "r2_key was not issued to this session");
+    }
+    this.session.pendingIdUpload = null;
 
     this.session.idImageR2Key = r2Key;
 
@@ -300,7 +315,11 @@ export class CheckinSession {
     if (!allowed.includes(field) || typeof value !== "string" || !value.trim()) {
       return this._error(ws, "Invalid ocr_correction: field must be one of " + allowed.join(", ") + " with a non-empty value");
     }
-    console.log("_handleOcrCorrection: " + field + " -> " + value);
+    // Confirmed bug (external review, 2026-09): this logged the actual
+    // corrected value (a real date of birth, address, etc.) — with Workers
+    // Logs enabled, that's PII landing in a persistent log store. Log which
+    // field changed, never the value itself.
+    console.log("_handleOcrCorrection: " + field + " updated");
     this.session.ocrData = { ...(this.session.ocrData || {}), [field]: value.trim() };
     await this._saveSession();
   }
@@ -360,7 +379,11 @@ export class CheckinSession {
       const parsed = JSON.parse(text);
       return this._pickOcrFields(parsed);
     } catch (err) {
-      console.error("Failed to parse OCR JSON:", err, "raw:", text);
+      // Confirmed bug (external review, 2026-09): logged the raw model
+      // output, which is the visitor's actual extracted ID data (name, DOB,
+      // ID number) straight from the vision model — real PII, not just a
+      // debugging string. Log the failure and its length, never the text.
+      console.error("Failed to parse OCR JSON:", err.message, "raw length:", text.length);
       return {};
     }
   }
@@ -395,17 +418,54 @@ export class CheckinSession {
     });
   }
 
+  // Confirmed bug (external review, 2026-09): this always wrote to
+  // questions[currentQuestionIndex] and always advanced, no matter why the
+  // message was sent. The system prompt told the agent to "correct" an
+  // earlier answer by calling submit_answer again — but that just landed in
+  // whatever slot came next, silently shifting every answer after it, and
+  // during "confirming" this whole block was skipped, so a correction
+  // spoken at the summary was dropped without a trace. The client now sends
+  // an explicit `field`, so the DO can target the right question directly
+  // instead of assuming "whichever one is next."
   async _handleTranscript(ws, data) {
     const text = (data.text || "").trim();
     if (!text) return;
+    // Also allowed during uploading_documents: a visitor can still ask to
+    // fix an earlier numbered answer while on the (optional) attachments
+    // step, before ever reaching the summary.
+    const correctable = ["asking_questions", "uploading_documents", "confirming"];
+    if (!correctable.includes(this.session.fsmState)) return;
 
-    if (this.session.fsmState === "asking_questions") {
-      const q = this.session.questions[this.session.currentQuestionIndex];
-      this.session.answers[q.id || `q${this.session.currentQuestionIndex}`] = text;
+    const questions = this.session.questions;
+    const currentQ = questions[this.session.currentQuestionIndex]; // undefined once all are answered
+    const field = data.field;
+
+    let targetQ;
+    if (field) {
+      targetQ = questions.find((q) => q.field_key === field);
+      if (!targetQ) return this._error(ws, `Unknown field: ${field}`);
+    } else {
+      // No field given (older client, or a stray message) — only safe to
+      // guess "the current one", and only while still mid-sequence.
+      targetQ = currentQ;
+    }
+    if (!targetQ) return;
+
+    this.session.answers[targetQ.id || targetQ.field_key] = text;
+
+    const isSequentialAdvance = this.session.fsmState === "asking_questions" && currentQ && targetQ.id === currentQ.id;
+    if (isSequentialAdvance) {
       this.session.currentQuestionIndex++;
       this._sendCurrentQuestion(ws);
-      await this._saveSession();
+    } else if (this.session.fsmState === "confirming") {
+      // A correction spoken after the summary — re-send it with the fix applied.
+      this._goToConfirming(ws);
     }
+    // Otherwise: a correction to an earlier question while still mid-sequence.
+    // The answer is updated in place; the current question position is
+    // untouched, so there's nothing to re-send.
+
+    await this._saveSession();
   }
 
   /* ------------------------------------------------------------------ */

@@ -266,6 +266,12 @@ export default {
 
     // ── Businesses: list all ──
     if (path === '/api/businesses' && method === 'GET') {
+      // Confirmed bug (external review, 2026-09): this had no auth at all,
+      // and SELECT * includes webhook_secret — anyone could fetch every
+      // configured secret with one unauthenticated GET. Nothing public ever
+      // needs this endpoint; only admin.html calls it.
+      const auth = await requireAdmin(request, env);
+      if (!auth.ok) return jsonResponse({ error: auth.error }, auth.status);
       try {
         // registrations_count lets the admin's Submissions tab show, at a
         // glance, which businesses actually have visitors — without it
@@ -287,6 +293,10 @@ export default {
       const bizId = questionsMatch[1];
       try {
         if (method === 'GET') {
+          // Same leak as the list endpoint above — SELECT * on businesses
+          // includes webhook_secret, and this had no auth check either.
+          const auth = await requireAdmin(request, env);
+          if (!auth.ok) return jsonResponse({ error: auth.error }, auth.status);
           const biz = await env.DB.prepare('SELECT * FROM businesses WHERE id = ?').bind(bizId).first();
           if (!biz) return jsonResponse({ error: 'Business not found' }, 404);
           const { results } = await env.DB.prepare(
@@ -366,6 +376,21 @@ export default {
       if (!auth.ok) return jsonResponse({ error: auth.error }, auth.status);
       const [, bizId, regId] = registrationMatch;
       try {
+        // Confirmed bug (external review, 2026-09): this only ever removed
+        // the D1 row — the ID photo and any additional documents stayed in
+        // R2 forever, "deleted" registration or not. Fetch what's there
+        // first and clean those up too, before dropping the row itself.
+        const reg = await env.DB.prepare(
+          'SELECT id_image_r2_key, documents_json FROM guest_registrations WHERE id = ? AND business_id = ?'
+        ).bind(regId, bizId).first();
+        if (reg) {
+          const keys = [];
+          if (reg.id_image_r2_key) keys.push(reg.id_image_r2_key);
+          for (const doc of safeJsonParse(reg.documents_json) || []) {
+            if (doc?.r2_key) keys.push(doc.r2_key);
+          }
+          await Promise.all(keys.map((k) => env.R2_DOCS.delete(k).catch(() => {})));
+        }
         await env.DB.prepare('DELETE FROM guest_registrations WHERE id = ? AND business_id = ?').bind(regId, bizId).run();
         return jsonResponse({ ok: true });
       } catch (e) {
@@ -437,6 +462,10 @@ export default {
       const id = bizMatch[1];
       try {
         if (method === 'GET') {
+          // Same leak as the other two businesses GET routes — fixed the
+          // same way.
+          const auth = await requireAdmin(request, env);
+          if (!auth.ok) return jsonResponse({ error: auth.error }, auth.status);
           const biz = await env.DB.prepare('SELECT * FROM businesses WHERE id = ?').bind(id).first();
           if (!biz) return jsonResponse({ error: 'Business not found' }, 404);
           return jsonResponse(biz);

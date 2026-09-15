@@ -187,11 +187,20 @@ directly to `wss://agents.assemblyai.com/v1/ws` with a token minted by
 `GET /api/token`, then configures the whole conversation per-session via
 `session.update`: the system prompt, greeting, and OCR data (if any) are built
 client-side from what the Durable Object already sent over its own WebSocket,
-and two function tools — `submit_answer` for each questionnaire answer and
-`correct_ocr_field` for fixing a misread ID field — let the agent report back
-what the visitor said. The Durable Object never
-talks to AssemblyAI directly — it only holds the FSM state, D1 reads/writes,
-and runs OCR via Workers AI when a document photo comes in.
+and three function tools let the agent report back what the visitor said:
+`submit_answer` (field + value — also used to correct an earlier answer),
+`correct_ocr_field` for fixing a misread ID field, and `confirm_registration`,
+the only thing that actually finalizes a check-in once the visitor confirms
+the summary. A manual "✅ Yes, that's correct" button on the summary screen
+sends the same confirmation directly, as a backup for when the agent doesn't
+call the tool. The Durable Object never talks to AssemblyAI directly — it
+only holds the FSM state, D1 reads/writes, and runs OCR via Workers AI when
+a document photo comes in.
+
+Voice only activates from an explicit "Tap to Start" gesture — browsers
+require AudioContext/microphone activation to happen inside a real user
+gesture's call stack, and starting it from an async WebSocket callback (the
+original design) left it stuck "suspended" forever with no visible error.
 
 ## 📱 Telegram Mini App
 
