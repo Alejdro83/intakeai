@@ -15,11 +15,33 @@ async function computeHmacSha256Hex(secret, message) {
   return [...new Uint8Array(sig)].map((b) => b.toString(16).padStart(2, "0")).join("");
 }
 
+const OPERATION_TYPES = new Set(["user_transcript", "ocr_correction", "confirm", "documents_done"]);
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const MAX_SESSION_OPERATIONS = 500;
+class OperationError extends Error {}
+
+function canonicalJson(value) {
+  if (Array.isArray(value)) return "[" + value.map(canonicalJson).join(",") + "]";
+  if (value && typeof value === "object") {
+    return "{" + Object.keys(value).sort().map(key => JSON.stringify(key) + ":" + canonicalJson(value[key])).join(",") + "}";
+  }
+  return JSON.stringify(value);
+}
+
+async function operationFingerprint(data) {
+  const { operation_id, ...payload } = data;
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(canonicalJson(payload)));
+  return [...new Uint8Array(digest)].map(byte => byte.toString(16).padStart(2, "0")).join("");
+}
+
 export class CheckinSession {
   constructor(state, env) {
     this.state = state;
     this.env = env;
     this.session = null; // loaded async in fetch(), on the WS upgrade
+    this.messageQueue = Promise.resolve();
+    this.outbound = null;
+    this.afterCommit = [];
   }
 
   _freshSession() {
@@ -33,6 +55,8 @@ export class CheckinSession {
       ocrData: null,
       idImageR2Key: null,
       startedAt: null,
+      operationReceipts: {},
+      pendingRegistration: null,
     };
   }
 
@@ -42,20 +66,33 @@ export class CheckinSession {
   }
 
   async _saveSession() {
-    try { await this.state.storage.put("session", this.session); } catch (e) {
-      console.error("Failed to save session:", e);
-    }
+    await this.state.storage.put("session", this.session);
+  }
+
+  _serialize(work) {
+    const result = this.messageQueue.then(work);
+    this.messageQueue = result.catch(() => {});
+    return result;
   }
 
   _send(ws, obj) {
+    if (this.outbound) {
+      this.outbound.push({ ws, obj: structuredClone(obj) });
+      return;
+    }
     try { ws.send(JSON.stringify(obj)); } catch (_) {}
   }
 
   _error(ws, message) {
+    if (this.outbound) throw new OperationError(message);
     this._send(ws, { type: "error", message });
   }
 
   async fetch(request) {
+    return this._serialize(() => this._fetch(request));
+  }
+
+  async _fetch(request) {
     if (request.headers.get("Upgrade") === "websocket") {
       const pair = new WebSocketPair();
       const [client, server] = Object.values(pair);
@@ -73,7 +110,12 @@ export class CheckinSession {
       return new Response(null, { status: 101, webSocket: client });
     }
     if (request.method === "PUT") {
-      return this._handleUploadRequest(request);
+      try { return await this._handleUploadRequest(request); } catch (_) {
+        this.session = null;
+        return new Response(JSON.stringify({ error: "Failed to save upload state; please retry" }), {
+          status: 500, headers: { "Content-Type": "application/json" },
+        });
+      }
     }
     return new Response("Expected WebSocket upgrade", { status: 426 });
   }
@@ -125,24 +167,94 @@ export class CheckinSession {
   }
 
   async webSocketMessage(ws, message) {
-    try {
-      await this._loadSession();
-      let data;
-      try { data = JSON.parse(message); } catch { return this._error(ws, "Invalid JSON"); }
+    return this._serialize(() => this._processMessage(ws, message));
+  }
 
+  async _processMessage(ws, message) {
+    let data, fingerprint, operationId;
+    try {
+      try { data = JSON.parse(message); } catch { return this._error(ws, "Invalid JSON"); }
+      if (!data || typeof data !== "object" || Array.isArray(data)) return this._error(ws, "Invalid message");
+      if (OPERATION_TYPES.has(data.type) && data.operation_id !== undefined) {
+        operationId = data.operation_id;
+        if (typeof operationId !== "string" || !UUID_PATTERN.test(operationId)) {
+          return this._send(ws, { type: "operation_result", operation_id: operationId, success: false, error: "operation_id must be a UUID" });
+        }
+        fingerprint = await operationFingerprint(data);
+      }
+      // Parse the operation identity before accessing storage so even a
+      // failed initial read can return a correlated, retryable negative ACK.
+      await this._loadSession();
+      if (operationId) {
+        const reservation = this.session.pendingRegistration;
+        if (reservation?.operationId === operationId && reservation.fingerprint !== fingerprint) {
+          return this._send(ws, { type: "operation_result", operation_id: operationId, success: false, error: "operation_id was already used with different content" });
+        }
+        const receipts = this.session.operationReceipts || {};
+        const previous = receipts[operationId];
+        if (previous) {
+          if (previous.fingerprint !== fingerprint) {
+            return this._send(ws, { type: "operation_result", operation_id: operationId, success: false, error: "operation_id was already used with different content" });
+          }
+          this._send(ws, previous.result);
+          if (data.type === "confirm" && previous.result.success && this.session.lastRegistrationId) {
+            this._send(ws, { type: "checkin_complete", registration_id: this.session.lastRegistrationId });
+          }
+          return;
+        }
+        if (Object.keys(receipts).length >= MAX_SESSION_OPERATIONS) {
+          return this._send(ws, { type: "operation_result", operation_id: operationId, success: false, error: "Session operation limit reached" });
+        }
+      }
+
+      // Buffer UI events until both the mutation and its dedupe receipt are durable.
+      // The ACK must precede checkin_complete, which tears down the voice client.
+      this.outbound = [];
+      this.afterCommit = [];
+      this.activeOperation = operationId ? { operationId, fingerprint } : null;
       switch (data.type) {
-        case "start": return await this._handleStart(ws, data);
-        case "user_transcript": return await this._handleTranscript(ws, data);
-        case "id_uploaded": return await this._handleIdUploaded(ws, data);
-        case "ocr_correction": return await this._handleOcrCorrection(ws, data);
-        case "confirm": return await this._handleConfirm(ws);
-        case "documents_done": return await this._handleDocumentsDone(ws);
-        case "resume": return await this._handleResume(ws);
-        default: return this._error(ws, `Unknown message type: ${data.type}`);
+        case "start": await this._handleStart(ws, data); break;
+        case "user_transcript": await this._handleTranscript(ws, data); break;
+        case "id_uploaded": await this._handleIdUploaded(ws, data); break;
+        case "ocr_correction": await this._handleOcrCorrection(ws, data); break;
+        case "confirm": await this._handleConfirm(ws); break;
+        case "documents_done": await this._handleDocumentsDone(ws); break;
+        case "resume": await this._handleResume(ws, data); break;
+        default: this._error(ws, `Unknown message type: ${data.type}`);
+      }
+      const result = operationId ? { type: "operation_result", operation_id: operationId, success: true } : null;
+      if (result) {
+        this.session.operationReceipts ||= {};
+        this.session.operationReceipts[operationId] = { fingerprint, result };
+      }
+      await this._saveSession();
+      const events = this.outbound, afterCommit = this.afterCommit;
+      this.outbound = null; this.afterCommit = []; this.activeOperation = null;
+      if (result) this._send(ws, result);
+      for (const event of events) this._send(event.ws, event.obj);
+      for (const run of afterCommit) {
+        try { run(); } catch (_) { console.error("Post-commit task could not be scheduled"); }
       }
     } catch (err) {
-      console.error("webSocketMessage FATAL:", err);
-      this._error(ws, "Internal error: " + err.message);
+      this.outbound = null; this.afterCommit = []; this.activeOperation = null;
+      // A failed write must not remain visible in memory on the next message.
+      // Reload also preserves a confirm checkpoint made before a D1 insertion.
+      this.session = null;
+      const error = err instanceof OperationError ? err.message : "Failed to save operation; retry with the same operation_id";
+      if (operationId && fingerprint) {
+        const result = { type: "operation_result", operation_id: operationId, success: false, error, retryable: !(err instanceof OperationError) };
+        if (err instanceof OperationError) {
+          try {
+            await this._loadSession();
+            this.session.operationReceipts ||= {};
+            this.session.operationReceipts[operationId] = { fingerprint, result };
+            await this._saveSession();
+          } catch (_) { this.session = null; }
+        }
+        this._send(ws, result);
+      } else {
+        this._error(ws, error);
+      }
     }
   }
 
@@ -155,6 +267,10 @@ export class CheckinSession {
   }
 
   async alarm() {
+    return this._serialize(() => this._expireSession());
+  }
+
+  async _expireSession() {
     for (const ws of this.state.getWebSockets()) {
       this._send(ws, { type: "error", message: "Session timed out" });
       try { ws.close(); } catch (_) {}
@@ -170,6 +286,7 @@ export class CheckinSession {
   async _handleStart(ws, data) {
     const businessId = data.business_id;
     if (!businessId) return this._error(ws, "Missing business_id");
+    if (this.session.businessId) return this._handleResume(ws, data);
 
     this.session.businessId = businessId;
 
@@ -219,7 +336,6 @@ export class CheckinSession {
       this._sendCurrentQuestion(ws);
     }
 
-    await this._saveSession();
   }
 
   /**
@@ -229,10 +345,30 @@ export class CheckinSession {
    * scanning_doc/asking_questions unconditionally, which would re-request a
    * scan or a question the visitor already got past).
    */
-  async _handleResume(ws) {
+  async _handleResume(ws, data = {}) {
     if (!this.session.businessId) {
       return this._error(ws, "No active session to resume");
     }
+    if (data.business_id !== undefined && data.business_id !== this.session.businessId) {
+      return this._error(ws, "Session belongs to a different business");
+    }
+    const config = this.session.businessConfig || {};
+    const businessName = config.name || "our office";
+    this._send(ws, {
+      type: "session_restored",
+      business_id: this.session.businessId,
+      business_name: businessName,
+      business_type: config.business_type || "",
+      welcome_message: config.welcome_message || `Welcome to ${businessName}!`,
+      voice_id: config.voice_id || "anna",
+      voice_persona: config.voice_persona || "",
+      requires_id_scan: !!config.requires_id_scan,
+      questions: this.session.questions.map(q => ({ id: q.id, text: q.question_text, type: q.validation_type, field: q.field_key })),
+      answers: this.session.answers || {},
+      ocr_data: this.session.ocrData || {},
+      current_question_index: this.session.currentQuestionIndex,
+      state: this.session.fsmState,
+    });
     switch (this.session.fsmState) {
       case "scanning_doc":
         this._send(ws, { type: "request_camera", text: "Please scan your ID document" });
@@ -300,7 +436,6 @@ export class CheckinSession {
     this.session.fsmState = "asking_questions";
     this._sendQuestionsReady(ws);
     this._sendCurrentQuestion(ws);
-    await this._saveSession();
   }
 
   /**
@@ -312,6 +447,10 @@ export class CheckinSession {
    * summary) stayed on the original, possibly-wrong OCR value forever.
    */
   async _handleOcrCorrection(ws, data) {
+    if (!["asking_questions", "uploading_documents", "confirming"].includes(this.session.fsmState)) {
+      return this._error(ws, "Not accepting OCR corrections in this state");
+    }
+    if (this.session.pendingRegistration) return this._error(ws, "Confirmation is pending; retry confirmation");
     const { field, value } = data;
     const allowed = ["name", "id_number", "date_of_birth", "address"];
     if (!allowed.includes(field) || typeof value !== "string" || !value.trim()) {
@@ -323,7 +462,7 @@ export class CheckinSession {
     // field changed, never the value itself.
     console.log("_handleOcrCorrection: " + field + " updated");
     this.session.ocrData = { ...(this.session.ocrData || {}), [field]: value.trim() };
-    await this._saveSession();
+    if (this.session.fsmState === "confirming") this._goToConfirming(ws);
   }
 
   /**
@@ -430,13 +569,14 @@ export class CheckinSession {
   // an explicit `field`, so the DO can target the right question directly
   // instead of assuming "whichever one is next."
   async _handleTranscript(ws, data) {
-    const text = (data.text || "").trim();
-    if (!text) return;
+    const text = typeof data.text === "string" ? data.text.trim() : "";
+    if (!text) return this._error(ws, "Answer must be a non-empty string");
     // Also allowed during uploading_documents: a visitor can still ask to
     // fix an earlier numbered answer while on the (optional) attachments
     // step, before ever reaching the summary.
     const correctable = ["asking_questions", "uploading_documents", "confirming"];
-    if (!correctable.includes(this.session.fsmState)) return;
+    if (!correctable.includes(this.session.fsmState)) return this._error(ws, "Not accepting answers in this state");
+    if (this.session.pendingRegistration) return this._error(ws, "Confirmation is pending; retry confirmation");
 
     const questions = this.session.questions;
     const currentQ = questions[this.session.currentQuestionIndex]; // undefined once all are answered
@@ -451,11 +591,14 @@ export class CheckinSession {
       // guess "the current one", and only while still mid-sequence.
       targetQ = currentQ;
     }
-    if (!targetQ) return;
+    if (!targetQ) return this._error(ws, "No question to answer");
+    if (this.session.fsmState === "asking_questions" && questions.indexOf(targetQ) > this.session.currentQuestionIndex) {
+      return this._error(ws, "Answer the current question before a later question");
+    }
 
     this.session.answers[targetQ.id || targetQ.field_key] = text;
 
-    const isSequentialAdvance = this.session.fsmState === "asking_questions" && currentQ && targetQ.id === currentQ.id;
+    const isSequentialAdvance = this.session.fsmState === "asking_questions" && currentQ && targetQ === currentQ;
     if (isSequentialAdvance) {
       this.session.currentQuestionIndex++;
       this._sendCurrentQuestion(ws);
@@ -466,8 +609,6 @@ export class CheckinSession {
     // Otherwise: a correction to an earlier question while still mid-sequence.
     // The answer is updated in place; the current question position is
     // untouched, so there's nothing to re-send.
-
-    await this._saveSession();
   }
 
   /* ------------------------------------------------------------------ */
@@ -500,7 +641,6 @@ export class CheckinSession {
       return this._error(ws, "Not expecting documents_done (state=" + this.session.fsmState + ")");
     }
     this._goToConfirming(ws);
-    await this._saveSession();
   }
 
   /* ------------------------------------------------------------------ */
@@ -517,57 +657,66 @@ export class CheckinSession {
   }
 
   async _handleConfirm(ws) {
+    if (this.session.fsmState === "done" && this.session.lastRegistrationId) {
+      this._send(ws, { type: "checkin_complete", registration_id: this.session.lastRegistrationId });
+      return;
+    }
     if (this.session.fsmState !== "confirming") {
       return this._error(ws, "Not ready for confirmation");
     }
-
-    const registrationId = crypto.randomUUID();
-
-    try {
-      await this.env.DB.prepare(
-        `INSERT INTO guest_registrations (id, business_id, answers_json, ocr_data_json, id_image_r2_key, documents_json, status) VALUES (?, ?, ?, ?, ?, ?, 'completed')`
-      ).bind(
-        registrationId,
-        this.session.businessId,
-        JSON.stringify(this.session.answers),
-        JSON.stringify(this.session.ocrData || {}),
-        this.session.idImageR2Key || null,
-        JSON.stringify(this.session.additionalDocs || [])
-      ).run();
-    } catch (err) {
-      return this._error(ws, `Failed to save registration: ${err.message}`);
+    // D1 and DO storage are separate stores. Reserve the identity AND payload
+    // durably before inserting, so a retry after a partial commit uses the same
+    // primary key and the exact same submitted answers.
+    if (!this.session.pendingRegistration) {
+      this.session.pendingRegistration = {
+        id: crypto.randomUUID(),
+        ...(this.activeOperation || {}),
+        businessId: this.session.businessId,
+        answersJson: JSON.stringify(this.session.answers),
+        ocrJson: JSON.stringify(this.session.ocrData || {}),
+        idImageR2Key: this.session.idImageR2Key || null,
+        documentsJson: JSON.stringify(this.session.additionalDocs || []),
+      };
+      await this._saveSession();
     }
+    const registration = this.session.pendingRegistration;
+    const result = await this.env.DB.prepare(
+      `INSERT INTO guest_registrations (id, business_id, answers_json, ocr_data_json, id_image_r2_key, documents_json, status) VALUES (?, ?, ?, ?, ?, ?, 'completed') ON CONFLICT(id) DO NOTHING`
+    ).bind(registration.id, registration.businessId, registration.answersJson, registration.ocrJson,
+      registration.idImageR2Key, registration.documentsJson).run();
+    if (result?.success === false) throw new Error("Registration insert failed");
 
     this.session.fsmState = "done";
-    this.session.lastRegistrationId = registrationId; // so a reconnect-resume can report it too
-    this._send(ws, { type: "checkin_complete", registration_id: registrationId });
-    await this._saveSession();
-
-    // Fire-and-forget: a business's own CRM/PMS can subscribe to check-ins
-    // without any custom integration. waitUntil keeps the Worker alive long
-    // enough to deliver it without making the visitor wait on it.
-    this.state.waitUntil(this._fireWebhook(registrationId));
-
-    setTimeout(() => { try { ws.close(); } catch (_) {} }, 2000);
+    this.session.lastRegistrationId = registration.id;
+    this._send(ws, { type: "checkin_complete", registration_id: registration.id });
+    if (!this.session.webhookClaimed) {
+      this.session.webhookClaimed = true;
+      const deliverySession = structuredClone(this.session);
+      // The claim and completion are committed before dispatch. Normal replay
+      // never sends twice. This is best-effort delivery, not an atomic outbox:
+      // a process loss between the durable claim and fetch can lose delivery.
+      this.afterCommit.push(() => this.state.waitUntil(this._fireWebhook(registration.id, deliverySession)));
+    }
+    this.afterCommit.push(() => setTimeout(() => { try { ws.close(); } catch (_) {} }, 2000));
   }
 
-  async _fireWebhook(registrationId) {
-    const url = this.session.businessConfig?.webhook_url;
+  async _fireWebhook(registrationId, session = this.session) {
+    const url = session.businessConfig?.webhook_url;
     if (!url) return;
 
     const payload = {
       event: "checkin.completed",
-      business_id: this.session.businessId,
-      business_name: this.session.businessConfig?.name || "",
+      business_id: session.businessId,
+      business_name: session.businessConfig?.name || "",
       registration_id: registrationId,
       created_at: new Date().toISOString(),
-      answers: this.session.answers,
-      ocr_data: this.session.ocrData || null,
+      answers: session.answers,
+      ocr_data: session.ocrData || null,
     };
     const body = JSON.stringify(payload);
     const headers = { "Content-Type": "application/json" };
 
-    const secret = this.session.businessConfig?.webhook_secret;
+    const secret = session.businessConfig?.webhook_secret;
     if (secret) {
       headers["X-Virtualobby-Signature"] = `sha256=${await computeHmacSha256Hex(secret, body)}`;
     }
@@ -575,10 +724,10 @@ export class CheckinSession {
     try {
       const res = await fetch(url, { method: "POST", headers, body, signal: AbortSignal.timeout(8000) });
       if (!res.ok) {
-        console.error(`Webhook delivery failed for business ${this.session.businessId}: HTTP ${res.status}`);
+        console.error(`Webhook delivery failed for business ${session.businessId}: HTTP ${res.status}`);
       }
     } catch (err) {
-      console.error(`Webhook delivery error for business ${this.session.businessId}: ${err.message}`);
+      console.error(`Webhook delivery error for business ${session.businessId}: ${err.message}`);
     }
   }
 }

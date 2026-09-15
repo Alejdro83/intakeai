@@ -284,10 +284,13 @@ the visitor's check-in; only `https://` URLs are accepted.
 What this is *not*, yet — called out directly rather than left for someone
 to discover:
 
-- **No automated test suite.** Every fix in this repo's history was verified
-  manually against a local `wrangler dev` instance (fabricated Telegram
-  `initData`, a real WebSocket session) or, for client-side bugs, against a
-  headless-browser capture of the live page — not by a CI pipeline.
+- **Offline regression tests, not a production voice certification.** Run
+  `node --test tests/*.test.mjs` with Node 24 or later; no dependencies need
+  installing. The suite exercises the real client and Durable Object with
+  synthetic devices/events, including integration tests against SQLite and
+  the repository schema. See [tests/README.md](tests/README.md) for scope,
+  protocol and rollout notes. Live ASR/LLM/TTS and deployed Cloudflare behavior
+  still need an end-to-end check; these tests are not yet wired to CI.
 - **No PII retention/deletion policy.** Visitor data — scanned ID photos in
   R2, answers and OCR fields (name, date of birth, ID number) in D1 —
   persists indefinitely once a check-in completes. `admin.html` can delete a
