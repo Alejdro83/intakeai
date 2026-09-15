@@ -417,7 +417,18 @@ function restoreSession(msg) {
     state.resumed = true;
     state.scanCompleted = msg.state !== 'scanning_doc';
     if (state.aaiReady) {
-        state.aaiWs?.send(JSON.stringify({ type: 'session.update', session: { system_prompt: buildInterviewPrompt() } }));
+        // Must resend tools/input.turn_detection too — a session.update that
+        // only touches system_prompt silently drops back to AssemblyAI's own
+        // defaults (barge-in on, lower vad_threshold), which is exactly what
+        // made the agent cut off on background noise after any reconnect.
+        state.aaiWs?.send(JSON.stringify({
+            type: 'session.update',
+            session: {
+                system_prompt: buildInterviewPrompt(),
+                tools: buildInterviewTools(),
+                input: { turn_detection: TURN_DETECTION, keyterms: buildKeyterms() },
+            },
+        }));
     } else if (!state.voiceConnecting && msg.state !== 'done') {
         state.pendingInterviewHandoff = msg.state === 'asking_questions' || msg.state === 'confirming';
         connectToAssemblyAI().catch(err => { cleanupAudio(); showVoiceRetry('Voice failed: ' + err.message); });
