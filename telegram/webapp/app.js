@@ -1,3 +1,5 @@
+import { prepareAudio } from './audio-lifecycle.js';
+
 /**
  * Virtualobby — Dual-WebSocket WebApp
  *
@@ -86,6 +88,11 @@ const state = {
     aaiReady: false, questions: [], answers: {}, ocrData: null,
     requiresIdScan: false, voiceConnecting: false, pendingToolResults: [], checkinDone: false,
     documentsUploadedCount: 0,
+    audioAbort: null, startPending: false, voiceGeneration: 0,
+    captureNode: null, captureSource: null, voiceTimer: null,
+    lastAAIEvent: null, replyNumber: 0, toolCalls: new Map(), operations: new Map(),
+    interviewHandoffGeneration: -1, fsmState: 'idle', resumed: false,
+    currentQuestionIndex: 0, manualConfirmOperationId: null, documentsOperationId: null,
     // True once the DO has moved past scanning (questions_ready received),
     // regardless of whether OCR actually found anything — OCR is best-effort
     // and empty fields is an expected outcome, not a reason to stay in the
@@ -175,62 +182,47 @@ async function init() {
     // page load, left audio stuck "suspended" forever with no visible error
     // (confirmed via a real browser test). Everything below waits for the
     // visitor to tap Start.
-    elements.btnStart?.addEventListener('click', startCheckin, { once: true });
+    elements.btnStart?.addEventListener('click', startCheckin);
 }
 
 async function startCheckin() {
+    if (state.startPending) return;
+    cleanupAudio();
+    state.startPending = true;
     if (elements.btnStart) { elements.btnStart.disabled = true; elements.btnStart.textContent = 'Starting…'; }
-    dbg('Start tapped — priming audio from the user gesture');
     try {
         await primeAudio();
+        elements.stepStart?.classList.add('hidden');
+        updateStatus('Connecting...');
+        await connectToDO();
     } catch (err) {
-        dbg('Audio priming failed: ' + err.message);
-        updateStatus('Microphone/audio failed: ' + err.message);
-        if (elements.btnStart) {
-            elements.btnStart.disabled = false;
-            elements.btnStart.textContent = '🎤 Tap to Start';
-            elements.btnStart.addEventListener('click', startCheckin, { once: true });
-        }
-        return;
+        cleanupAudio();
+        showVoiceRetry('Could not start: ' + err.message);
+    } finally {
+        state.startPending = false;
     }
-    elements.stepStart?.classList.add('hidden');
-    updateStatus('Connecting...');
-    dbg('Calling connectToDO()...');
-    await connectToDO();
 }
 
-// Creates and activates the audio pipeline (AudioContexts + mic permission)
-// synchronously enough within the Start tap's call stack to satisfy browser
-// autoplay policy — connectToAssemblyAI() reuses what this sets up instead
-// of creating its own from an async WebSocket callback, which is what
-// caused captureCtx/playbackCtx to stay stuck "suspended" before.
-async function primeAudio() {
-    dbg('Creating AudioContexts at ' + WIRE_RATE + ' Hz (from user gesture)...');
-    state.captureCtx = new AudioContext({ sampleRate: WIRE_RATE });
-    state.playbackCtx = new AudioContext({ sampleRate: WIRE_RATE });
-    dbg('captureCtx.state=' + state.captureCtx.state + ' playbackCtx.state=' + state.playbackCtx.state);
-
-    await state.captureCtx.resume();
-    await state.playbackCtx.resume();
-    dbg('After resume: capture=' + state.captureCtx.state + ' playback=' + state.playbackCtx.state);
-
-    updateStatus('Requesting microphone...');
-    try {
-        dbg('Calling getUserMedia...');
-        const stream = await Promise.race([
-            navigator.mediaDevices.getUserMedia({
-                audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true },
-            }),
-            new Promise((_, reject) => setTimeout(() => reject(new Error('Mic permission timeout (10s)')), 10000)),
-        ]);
-        dbg('getUserMedia OK, tracks=' + stream.getAudioTracks().length);
-        state.mic = stream;
-    } catch (micErr) {
-        dbg('MIC FAILED: ' + micErr.message);
-        state.captureCtx?.close(); state.playbackCtx?.close();
-        state.captureCtx = state.playbackCtx = null;
-        throw new Error('Microphone access failed: ' + micErr.message);
+function showVoiceRetry(message) {
+    if (state.checkinDone) return;
+    updateStatus(message);
+    elements.stepStart?.classList.remove('hidden');
+    if (elements.btnStart) {
+        elements.btnStart.disabled = false;
+        elements.btnStart.textContent = state.sessionId ? '🎤 Resume conversation' : '🎤 Tap to Start';
     }
+}
+
+async function primeAudio() {
+    const controller = new AbortController();
+    state.audioAbort = controller;
+    const audio = await prepareAudio({ sampleRate: WIRE_RATE, signal: controller.signal });
+    if (state.audioAbort !== controller || controller.signal.aborted) {
+        audio.mic.getTracks().forEach(track => track.stop());
+        await Promise.allSettled([audio.captureCtx.close(), audio.playbackCtx.close()]);
+        throw new Error('Audio start cancelled');
+    }
+    Object.assign(state, audio);
 }
 
 // ── DO WebSocket ───────────────────────────────────────────────────────────
@@ -240,15 +232,20 @@ let doReconnectAttempts = 0;
 let doReconnectTimer = null;
 
 function wireDoWs(isResume) {
+    const ws = state.doWs;
+    const isCurrent = () => state.doWs === ws;
     // Timeout: if WebSocket doesn't open in 10s, show error
     const connectTimeout = setTimeout(() => {
-        if (state.doWs && state.doWs.readyState !== WebSocket.OPEN) {
-            dbg('ERROR: DO WebSocket timed out after 10s');
-            updateStatus('Connection timed out — check network');
+        if (isCurrent() && ws.readyState !== WebSocket.OPEN) {
+            state.doWs = null;
+            ws.close();
+            cleanupAudio();
+            showVoiceRetry('Connection timed out. Check the network and tap to reconnect.');
         }
     }, 10000);
 
-    state.doWs.onopen = () => {
+    ws.onopen = () => {
+        if (!isCurrent()) return;
         clearTimeout(connectTimeout);
         doReconnectAttempts = 0; // back to a clean slate once we're actually connected
         dbg('DO WebSocket OPENED ✓' + (isResume ? ' (resume)' : ''));
@@ -256,14 +253,15 @@ function wireDoWs(isResume) {
         // progress — resending "start" here would force the DO back into
         // scanning_doc/asking_questions and re-ask for a scan or a question
         // the visitor already got past.
-        const msg = isResume ? { type: 'resume' } : { type: 'start', business_id: state.businessId };
+        const msg = isResume ? { type: 'resume', business_id: state.businessId } : { type: 'start', business_id: state.businessId };
         dbg('Sending to DO: ' + JSON.stringify(msg));
         state.doWs.send(JSON.stringify(msg));
         updateStatus(isResume ? 'Reconnected' : 'Loading business...');
     };
 
-    state.doWs.onmessage = (e) => {
-        dbg('DO MSG raw: ' + (typeof e.data === 'string' ? e.data.substring(0, 200) : '(binary)'));
+    ws.onmessage = (e) => {
+        if (!isCurrent()) return;
+        // Do not log response bodies: they can contain visitor information.
         try {
             const msg = JSON.parse(e.data);
             handleDOMessage(msg);
@@ -272,12 +270,17 @@ function wireDoWs(isResume) {
         }
     };
 
-    state.doWs.onerror = () => {
+    ws.onerror = () => {
+        if (!isCurrent()) return;
         clearTimeout(connectTimeout);
-        dbg('DO WebSocket ERROR');
+        state.doWs = null;
+        ws.close();
+        cleanupAudio();
+        showVoiceRetry('Connection failed. Tap to reconnect.');
     };
 
-    state.doWs.onclose = (ev) => {
+    ws.onclose = (ev) => {
+        if (!isCurrent()) return;
         clearTimeout(connectTimeout);
         dbg('DO WebSocket CLOSED code=' + ev.code + ' reason=' + (ev.reason || '(none)'));
         // 1000/1005 are the normal ways this closes (the DO's own 2s-delayed
@@ -287,9 +290,17 @@ function wireDoWs(isResume) {
         // which is what a flaky mobile connection or a backgrounded tab
         // produces mid-interview — is worth reconnecting for instead of
         // leaving the visitor stuck silently on the voice screen.
-        if (ev.code === 1000 || ev.code === 1005 || state.checkinDone) return;
+        rejectPendingOperations('Connection lost. The result is unconfirmed; retry after reconnecting.');
+        if (state.checkinDone) return;
+        if (ev.code === 1000 || ev.code === 1005) {
+            cleanupAudio();
+            showVoiceRetry('Connection closed. Tap to reconnect.');
+            return;
+        }
+        state.micMuted = true;
         if (doReconnectAttempts >= DO_RECONNECT_MAX_ATTEMPTS) {
-            updateStatus('Connection lost — please restart the check-in');
+            cleanupAudio();
+            showVoiceRetry('Connection lost. Tap to reconnect.');
             return;
         }
         doReconnectAttempts++;
@@ -301,30 +312,32 @@ function wireDoWs(isResume) {
     };
 }
 
-// Persisted only in sessionStorage — cleared when the tab/browser closes,
-// never synced anywhere, and holds nothing but a random UUID (no answers,
-// no document data, nothing sensitive) — just enough to tell a genuine page
-// reload apart from a brand-new visitor, so a reload can resume progress
-// instead of restarting the whole interview (confirmed gap, external
-// review 2026-09: reloading always generated a fresh id here).
-const SESSION_STORAGE_KEY = 'vobb_session_id';
+// Store only a short-lived reference, scoped to its business. No visitor data.
+const SESSION_STORAGE_KEY = 'vobb_session_v2';
+const SESSION_TTL_MS = 10 * 60 * 1000;
+const OPERATION_TIMEOUT_MS = 10000;
 
 async function connectToDO() {
     let isResume = false;
-    try {
-        const stored = sessionStorage.getItem(SESSION_STORAGE_KEY);
-        if (stored) {
-            state.sessionId = stored;
-            isResume = true;
-        } else {
-            state.sessionId = crypto.randomUUID();
-            sessionStorage.setItem(SESSION_STORAGE_KEY, state.sessionId);
-        }
-    } catch (_) {
-        state.sessionId = crypto.randomUUID(); // sessionStorage unavailable (private mode, etc.)
+    let stored;
+    try { stored = JSON.parse(sessionStorage.getItem(SESSION_STORAGE_KEY) || 'null'); } catch (_) {}
+    if (stored && typeof stored.id === 'string' && stored.businessId === state.businessId
+            && Number.isFinite(stored.expiresAt) && stored.expiresAt > Date.now()) {
+        state.sessionId = stored.id;
+        isResume = true;
+    } else {
+        state.sessionId = crypto.randomUUID();
+        state.sessionExpiresAt = Date.now() + SESSION_TTL_MS;
+        try { sessionStorage.setItem(SESSION_STORAGE_KEY, JSON.stringify({
+            id: state.sessionId, businessId: state.businessId, expiresAt: state.sessionExpiresAt,
+        })); } catch (_) {}
     }
+    if (isResume) state.sessionExpiresAt = stored.expiresAt;
+    const old = state.doWs;
+    state.doWs = null;
+    old?.close();
+    clearTimeout(doReconnectTimer);
     const wsUrl = `${CONFIG.API_URL.replace('https://', 'wss://')}/api/ws/${state.sessionId}`;
-    dbg('DO WS URL: ' + wsUrl + (isResume ? ' (resuming after reload)' : ''));
     state.doWs = new WebSocket(wsUrl);
     wireDoWs(isResume);
 }
@@ -332,16 +345,107 @@ async function connectToDO() {
 function reconnectToDO() {
     if (!state.sessionId || state.checkinDone) return;
     const wsUrl = `${CONFIG.API_URL.replace('https://', 'wss://')}/api/ws/${state.sessionId}`;
-    dbg('DO WS reconnect URL: ' + wsUrl);
     state.doWs = new WebSocket(wsUrl);
     wireDoWs(true);
+}
+
+function rejectPendingOperations(message) {
+    for (const operation of state.operations.values()) {
+        clearTimeout(operation.timer);
+        operation.reject(new Error(message));
+    }
+    state.operations.clear();
+}
+
+function requestOperation(type, payload = {}, operationId = crypto.randomUUID()) {
+    const fingerprint = JSON.stringify({ type, payload });
+    const existing = state.operations.get(operationId);
+    if (existing) return existing.fingerprint === fingerprint ? existing.promise
+        : Promise.reject(new Error('Operation ID was reused for different data'));
+    if (state.doWs?.readyState !== 1) return Promise.reject(new Error('Not connected. Reconnect and try again.'));
+    let resolve, reject;
+    const promise = new Promise((res, rej) => { resolve = res; reject = rej; });
+    const operation = { promise, resolve, reject, fingerprint, sessionId: state.sessionId };
+    operation.timer = setTimeout(() => {
+        if (state.operations.get(operationId) !== operation) return;
+        state.operations.delete(operationId);
+        reject(new Error('Server confirmation timed out. The result is unconfirmed; retry to check it.'));
+    }, OPERATION_TIMEOUT_MS);
+    state.operations.set(operationId, operation);
+    try { state.doWs.send(JSON.stringify({ ...payload, type, operation_id: operationId })); }
+    catch (_) {
+        clearTimeout(operation.timer); state.operations.delete(operationId);
+        reject(new Error('Could not send the operation. Reconnect and try again.'));
+    }
+    return promise;
+}
+
+function applySessionDetails(msg) {
+    state.businessName = msg.business_name || '';
+    state.requiresIdScan = !!msg.requires_id_scan;
+    state.questions = msg.questions || [];
+    state.welcomeMessage = msg.welcome_message || `Welcome to ${state.businessName}`;
+    state.voiceId = msg.voice_id || 'anna';
+    state.voicePersona = msg.voice_persona || '';
+    const heading = $('header-title');
+    if (heading) heading.textContent = `Welcome to ${state.businessName}`;
+    updateBusinessIcon(msg.business_type);
+}
+
+function updateBusinessIcon(businessType) {
+    const icons = { clinic: '🏥', lawyer: '⚖️', hotel: '🏨', office: '🏢', event: '🎪' };
+    const icon = document.querySelector('.logo-icon');
+    if (icon) icon.textContent = icons[businessType] || '🏢';
+}
+
+function restoreSession(msg) {
+    if (msg.business_id !== state.businessId) {
+        rejectPendingOperations('Session belongs to another business');
+        cleanupAudio();
+        const ws = state.doWs; state.doWs = null; ws?.close();
+        try { sessionStorage.removeItem(SESSION_STORAGE_KEY); } catch (_) {}
+        state.sessionId = null;
+        showVoiceRetry('Session mismatch. Tap Start to begin again.');
+        return;
+    }
+    applySessionDetails(msg);
+    state.answers = msg.answers || {};
+    state.ocrData = msg.ocr_data || {};
+    state.currentQuestionIndex = msg.current_question_index || 0;
+    state.fsmState = msg.state;
+    state.micMuted = msg.state === 'scanning_doc' || msg.state === 'uploading_documents';
+    state.resumed = true;
+    state.scanCompleted = msg.state !== 'scanning_doc';
+    if (state.aaiReady) {
+        state.aaiWs?.send(JSON.stringify({ type: 'session.update', session: { system_prompt: buildInterviewPrompt() } }));
+    } else if (!state.voiceConnecting && msg.state !== 'done') {
+        state.pendingInterviewHandoff = msg.state === 'asking_questions' || msg.state === 'confirming';
+        connectToAssemblyAI().catch(err => { cleanupAudio(); showVoiceRetry('Voice failed: ' + err.message); });
+    }
 }
 
 function handleDOMessage(msg) {
     dbg('DO ← type=' + msg.type);
 
     switch (msg.type) {
+        case 'operation_result': {
+            const operation = state.operations.get(msg.operation_id);
+            if (!operation || operation.sessionId !== state.sessionId) break;
+            clearTimeout(operation.timer);
+            state.operations.delete(msg.operation_id);
+            if (msg.success === true) operation.resolve(msg);
+            else {
+                const error = new Error(msg.error || 'Server rejected the operation');
+                error.confirmedFailure = true;
+                error.retryable = msg.retryable === true;
+                operation.reject(error);
+            }
+            break;
+        }
+        case 'session_restored': restoreSession(msg); break;
         case 'welcome':
+            state.fsmState = msg.requires_id_scan ? 'scanning_doc' : 'asking_questions';
+            state.resumed = false;
             state.businessName = msg.business_name || '';
             state.requiresIdScan = msg.requires_id_scan;
             state.questions = msg.questions || [];
@@ -351,23 +455,18 @@ function handleDOMessage(msg) {
             dbg('Welcome: biz=' + state.businessName + ' requiresIdScan=' + state.requiresIdScan + ' questions=' + state.questions.length + ' voiceId=' + state.voiceId);
             const ht = $('header-title');
             if (ht) ht.textContent = `Welcome to ${state.businessName}`;
-            // Confirmed regression: this never actually existed as dynamic
-            // code — the header icon was always a hardcoded 🏥 — but it
-            // should reflect the business type, matching admin.html's own
-            // per-type icons.
-            const BUSINESS_ICONS = { clinic: '🏥', lawyer: '⚖️', hotel: '🏨', office: '🏢', event: '🎪' };
-            const logoIcon = document.querySelector('.logo-icon');
-            if (logoIcon) logoIcon.textContent = BUSINESS_ICONS[msg.business_type] || '🏢';
+            updateBusinessIcon(msg.business_type);
             updateStatus(`Welcome to ${state.businessName}!`);
             // Connect voice immediately so Anna speaks the greeting
             showStep(state.requiresIdScan ? 'scan' : 'voice');
             connectToAssemblyAI().catch(err => {
                 dbg('Voice failed: ' + err.message);
-                updateStatus('Voice failed: ' + err.message);
+                cleanupAudio(); showVoiceRetry('Voice failed: ' + err.message);
             });
             break;
 
         case 'request_camera':
+            state.fsmState = 'scanning_doc';
             dbg('Request camera received');
             updateStatus('Please upload your ID');
             showStep('scan');
@@ -381,22 +480,27 @@ function handleDOMessage(msg) {
             break;
 
         case 'questions_ready':
+            state.fsmState = 'asking_questions';
             dbg('Questions ready received, clearing OCR timeout');
             clearTimeout(state.ocrTimeout);
             state.questions = msg.questions || state.questions;
             state.ocrData = msg.ocr_data || state.ocrData;
             state.businessName = msg.business_name || state.businessName;
-            dbg('Questions count: ' + state.questions.length + ' ocrData: ' + JSON.stringify(state.ocrData));
+            dbg('Questions count: ' + state.questions.length);
             showStep('voice');
             proceedToInterview();
             break;
 
         case 'state':
+            state.currentQuestionIndex = msg.index;
+            state.fsmState = msg.state || 'asking_questions';
+            showStep('voice');
             dbg('Question state: ' + (msg.index + 1) + '/' + msg.total + ': ' + msg.question);
             updateStatus(`Question ${msg.index + 1}/${msg.total}: ${msg.question}`);
             break;
 
         case 'request_documents':
+            state.fsmState = 'uploading_documents';
             dbg('Request documents received: ' + msg.prompt);
             if (elements.documentsPrompt) elements.documentsPrompt.textContent = msg.prompt || '';
             state.micMuted = true; // this step is UI-driven, not a voice exchange
@@ -416,7 +520,7 @@ function handleDOMessage(msg) {
             if (msg.message === 'No active session to resume') {
                 dbg('Stored session is gone — clearing it and starting fresh');
                 try { sessionStorage.removeItem(SESSION_STORAGE_KEY); } catch (_) {}
-                state.doWs?.close(); state.doWs = null;
+                const old = state.doWs; state.doWs = null; old?.close();
                 connectToDO();
                 break;
             }
@@ -484,23 +588,20 @@ async function uploadAndProcess(blobOrFile, contentType) {
             throw new Error('Upload failed: ' + putResp.status + ' ' + t);
         }
         const { r2_key } = await putResp.json();
-        dbg('Upload complete, r2_key=' + r2_key);
+        dbg('Upload complete');
 
         if (state.doWs?.readyState !== 1) {
             dbg('DO NOT READY: readyState=' + (state.doWs?.readyState || 'null'));
             throw new Error('DO connection lost');
         }
         const idMsg = { type: 'id_uploaded', r2_key };
-        dbg('Sending to DO: readyState=' + state.doWs.readyState + ' url=' + state.doWs.url + ' msg=' + JSON.stringify(idMsg));
+        dbg('Sending uploaded document reference to server');
         state.doWs.send(JSON.stringify(idMsg));
         updateStatus('Processing document...');
 
-        // Safety timeout: if DO doesn't respond in 15s, skip OCR and go to voice
+        // The server owns the scan transition. A slow OCR must not start an interview while it is still scanning.
         state.ocrTimeout = setTimeout(() => {
-            dbg('OCR TIMEOUT (15s) — going to voice without OCR');
-            updateStatus('Connecting voice (OCR timeout)...');
-            showStep('voice');
-            proceedToInterview();
+            updateStatus('Document processing is taking longer than usual. Please wait for the scan result.');
         }, 15000);
 
     } catch (err) {
@@ -519,7 +620,19 @@ async function connectToAssemblyAI() {
         return;
     }
     state.voiceConnecting = true;
+    const generation = state.voiceGeneration;
+    const current = () => generation === state.voiceGeneration;
+    const captureCtx = state.captureCtx, playbackCtx = state.playbackCtx;
+    // Cover token retrieval and worklet setup as well as the WebSocket handshake.
+    const aaiTimeout = setTimeout(() => {
+        if (current() && !state.aaiReady) {
+            cleanupAudio();
+            showVoiceRetry('Voice connection timed out. Tap to reconnect.');
+        }
+    }, 10000);
+    state.voiceTimer = aaiTimeout;
 
+    try {
     dbg('connectToAssemblyAI() START');
 
     // 1. Get token
@@ -527,21 +640,22 @@ async function connectToAssemblyAI() {
     try {
         const tokenUrl = `${CONFIG.API_URL}/api/token`;
         dbg('Fetching token from: ' + tokenUrl);
-        const tokenResp = await fetch(tokenUrl);
+        const tokenResp = await fetch(tokenUrl, { signal: state.audioAbort?.signal });
+        if (!current()) return;
         dbg('Token response status: ' + tokenResp.status);
         if (!tokenResp.ok) {
-            const errBody = await tokenResp.text();
-            dbg('Token error body: ' + errBody);
-            throw new Error(`Token HTTP ${tokenResp.status}: ${errBody}`);
+            throw new Error(`Token HTTP ${tokenResp.status}`);
         }
         const data = await tokenResp.json();
+        if (!current()) return;
         token = data.token;
         if (!token) {
-            dbg('Token response data: ' + JSON.stringify(data));
+            dbg('Token response did not include a token');
             throw new Error('No token in response');
         }
         dbg('Token received ✓ (length=' + token.length + ')');
     } catch (e) {
+        if (!current()) return;
         state.voiceConnecting = false;
         dbg('TOKEN FETCH FAILED: ' + e.message);
         throw new Error('Token fetch failed: ' + e.message);
@@ -559,30 +673,29 @@ async function connectToAssemblyAI() {
     dbg('Reusing primed audio: capture=' + state.captureCtx.state + ' playback=' + state.playbackCtx.state);
 
     dbg('Setting up capture worklet...');
-    const source = state.captureCtx.createMediaStreamSource(stream);
-    const capture = await addWorklet(state.captureCtx, CAPTURE_WORKLET, 'capture');
+    const source = captureCtx.createMediaStreamSource(stream);
+    state.captureSource = source;
+    const capture = await addWorklet(captureCtx, CAPTURE_WORKLET, 'capture');
+    if (!current()) { capture.disconnect(); source.disconnect(); return; }
+    state.captureNode = capture;
     source.connect(capture);
     // NOTE: do NOT connect capture to destination — it only posts PCM via port.onmessage
 
     dbg('Setting up playback worklet...');
-    state.playback = await addWorklet(state.playbackCtx, PLAYBACK_WORKLET, 'playback');
-    state.playback.connect(state.playbackCtx.destination);
+    const playback = await addWorklet(playbackCtx, PLAYBACK_WORKLET, 'playback');
+    if (!current()) { playback.disconnect(); return; }
+    state.playback = playback;
+    playback.connect(playbackCtx.destination);
 
     // 3. Connect to AssemblyAI
     const aaiUrl = `${CONFIG.VOICE_AGENT_URL}?token=${token}`;
     dbg('Connecting AAI WebSocket to: ' + CONFIG.VOICE_AGENT_URL + '?token=***');
-    state.aaiWs = new WebSocket(aaiUrl);
-
-    // AAI connection timeout
-    const aaiTimeout = setTimeout(() => {
-        if (state.aaiWs && state.aaiWs.readyState !== WebSocket.OPEN) {
-            dbg('ERROR: AAI WebSocket timed out after 10s');
-            updateStatus('Voice connection timed out');
-            state.voiceConnecting = false;
-        }
-    }, 10000);
+    const ws = new WebSocket(aaiUrl);
+    state.aaiWs = ws;
+    const ownsSocket = () => current() && state.aaiWs === ws;
 
     capture.port.onmessage = ({ data }) => {
+        if (!ownsSocket()) return;
         if (!state.aaiReady || state.aaiWs?.readyState !== 1 || state.micMuted) return;
         const bytes = new Uint8Array(data);
         let binary = '';
@@ -590,8 +703,8 @@ async function connectToAssemblyAI() {
         state.aaiWs.send(JSON.stringify({ type: 'input.audio', audio: btoa(binary) }));
     };
 
-    state.aaiWs.onopen = () => {
-        clearTimeout(aaiTimeout);
+    ws.onopen = () => {
+        if (!ownsSocket()) return;
         dbg('AAI WebSocket OPENED ✓ — sending session.update');
 
         // Two phases: while a scan is still pending, this is announcement-only
@@ -605,7 +718,7 @@ async function connectToAssemblyAI() {
         // reliable, and letting the visitor's speech through can start a
         // real exchange that then collides with the interview handoff once
         // OCR finishes. Unmuted again in sendInterviewHandoff.
-        state.micMuted = scanPending;
+        state.micMuted = scanPending || state.fsmState === 'uploading_documents';
 
         // The business's configured welcome_message — previously stored in
         // D1 but never actually sent anywhere; every visitor heard the same
@@ -635,12 +748,14 @@ async function connectToAssemblyAI() {
                     tools: buildInterviewTools(),
                 },
         };
+        if (state.pendingInterviewHandoff) delete sessionUpdate.session.greeting;
         dbg('Sending session.update (scanPending=' + scanPending + ')');
         state.aaiWs.send(JSON.stringify(sessionUpdate));
         dbg('session.update sent ✓ — waiting for session.ready');
     };
 
-    state.aaiWs.onmessage = ({ data }) => {
+    ws.onmessage = ({ data }) => {
+        if (!ownsSocket()) return;
         try {
             handleAAILogic(JSON.parse(data));
         } catch (err) {
@@ -648,28 +763,37 @@ async function connectToAssemblyAI() {
         }
     };
 
-    state.aaiWs.onerror = (err) => {
+    ws.onerror = (err) => {
+        if (!ownsSocket()) return;
         clearTimeout(aaiTimeout);
         dbg('AAI WebSocket ERROR');
-        updateStatus('Voice connection error');
-        state.voiceConnecting = false;
+        cleanupAudio();
+        showVoiceRetry('Voice connection error. Tap to reconnect.');
     };
 
-    state.aaiWs.onclose = (ev) => {
+    ws.onclose = (ev) => {
         clearTimeout(aaiTimeout);
-        dbg('AAI WebSocket CLOSED code=' + ev.code + ' reason=' + (ev.reason || '(none)'));
-        state.aaiReady = false;
-        state.voiceConnecting = false;
-        state.aaiWs = null;
-        if (ev.code !== 1000) updateStatus('Voice disconnected — ' + (ev.reason || 'code ' + ev.code));
+        if (!ownsSocket()) return;
+        cleanupAudio();
+        showVoiceRetry('Voice disconnected. Tap to reconnect.');
     };
+    } catch (error) {
+        // An abandoned setup may reject after a new visitor has started.
+        if (current()) {
+            cleanupAudio();
+            showVoiceRetry('Voice setup failed: ' + error.message);
+        }
+    }
 }
 
+
 function handleAAILogic(msg) {
+    state.lastAAIEvent = msg.type;
     dbg('AAI ← ' + msg.type);
     switch (msg.type) {
         case 'session.ready':
             dbg('session.ready — VOICE IS LIVE ✓');
+            clearTimeout(state.voiceTimer);
             state.aaiReady = true;
             state.voiceConnecting = false;
             updateStatus('Listening...');
@@ -694,14 +818,15 @@ function handleAAILogic(msg) {
             break;
         }
 
-        case 'reply.started': updateStatus('Speaking...'); break;
+        case 'reply.started': state.replyNumber++; updateStatus('Speaking...'); break;
         case 'reply.done':
             updateStatus('Listening...');
             if (msg.status === 'interrupted') {
                 // Per AssemblyAI docs: discard any tool.result queued during a reply
                 // that got cut short — the turn it belonged to no longer exists.
                 state.playback?.port.postMessage('stop');
-                state.pendingToolResults = [];
+                for (const entry of state.toolCalls.values()) if (entry.reply === state.replyNumber) entry.cancelled = true;
+                state.pendingToolResults = state.pendingToolResults.filter(entry => !entry.cancelled);
             } else {
                 flushPendingToolResults();
             }
@@ -709,13 +834,13 @@ function handleAAILogic(msg) {
         case 'transcript.user': addMessage('user', msg.text); break;
         case 'transcript.agent': addMessage('agent', msg.text); break;
         case 'session.ended': state.aaiReady = false; break;
-        case 'session.error': dbg('AAI session.error: ' + msg.message); updateStatus('Voice error: ' + msg.message); break;
+        case 'session.error': cleanupAudio(); showVoiceRetry('Voice error. Tap to reconnect.'); break;
 
         case 'tool.call':
             queueToolResult(msg);
             break;
         default:
-            dbg('Unhandled AAI message: ' + msg.type + ' ' + JSON.stringify(msg).substring(0, 200));
+            dbg('Unhandled AAI message: ' + msg.type);
             break;
     }
 }
@@ -726,67 +851,48 @@ function handleAAILogic(msg) {
 // and flush from the reply.done handler in handleAAILogic.
 
 function queueToolResult(msg) {
-    if (msg.name === 'submit_answer') {
-        const field = msg.arguments?.field || '';
-        const answer = msg.arguments?.answer || '';
-        dbg('Tool call queued submit_answer: field=' + field + ' answer=' + answer);
-        // Confirmed bug (external review, 2026-09): this used to report
-        // success:true unconditionally, even with the DO socket closed — the
-        // agent would believe an answer (or, worse, the final confirmation)
-        // was saved when nothing reached the server at all. A real ack from
-        // the DO after it persists is the complete fix; this at least stops
-        // lying about it when we can see outright that delivery failed.
-        const delivered = state.doWs?.readyState === 1;
-        if (delivered) state.doWs.send(JSON.stringify({ type: 'user_transcript', text: answer, field }));
-        state.pendingToolResults.push({
-            call_id: msg.call_id,
-            result: JSON.stringify(delivered ? { success: true } : { success: false, error: 'not connected to server — try again' }),
-        });
-    } else if (msg.name === 'correct_ocr_field') {
-        // Without this, a spoken correction only ever lived in the LLM's own
-        // conversation memory — it would say the fix back correctly, but the
-        // stored ocrData (on-screen card, final summary, and the D1 record)
-        // stayed on the original wrong OCR value forever.
-        const field = msg.arguments?.field;
-        const value = msg.arguments?.value;
-        dbg('Tool call correct_ocr_field: ' + field + ' = ' + value);
-        const validArgs = !!(field && value);
-        const delivered = validArgs && state.doWs?.readyState === 1;
-        if (delivered) {
-            state.ocrData = { ...(state.ocrData || {}), [field]: value };
+    if (!msg.call_id || state.toolCalls.has(msg.call_id)) return;
+    const generation = state.voiceGeneration;
+    const entry = { call_id: msg.call_id, generation, reply: state.replyNumber, cancelled: false, sent: false };
+    state.toolCalls.set(msg.call_id, entry);
+    let type, payload;
+    const args = msg.arguments || {};
+    if (msg.name === 'submit_answer') { type = 'user_transcript'; payload = { field: args.field, text: args.answer }; }
+    else if (msg.name === 'correct_ocr_field') { type = 'ocr_correction'; payload = { field: args.field, value: args.value }; }
+    else if (msg.name === 'confirm_registration') { type = 'confirm'; payload = {}; }
+    const operation = type ? requestOperation(type, payload) : Promise.reject(new Error('Unknown tool'));
+    entry.promise = operation.then(() => {
+        if (generation !== state.voiceGeneration || entry.cancelled) return;
+        if (type === 'ocr_correction') {
+            state.ocrData = { ...(state.ocrData || {}), [args.field]: args.value };
             displayOCRResult(state.ocrData);
-            state.doWs.send(JSON.stringify({ type: 'ocr_correction', field, value }));
         }
-        state.pendingToolResults.push({
-            call_id: msg.call_id,
-            result: JSON.stringify(delivered ? { success: true } : { success: false, error: validArgs ? 'not connected to server — try again' : 'missing field or value' }),
-        });
-    } else if (msg.name === 'confirm_registration') {
-        // The only thing that actually finalizes a check-in — without this,
-        // guest_registrations never gets a row and the visitor is stuck on
-        // the voice screen forever, since checkin_complete (which drives
-        // showDone()) is only ever sent in reply to this.
-        dbg('Tool call confirm_registration');
-        const delivered = state.doWs?.readyState === 1;
-        if (delivered) state.doWs.send(JSON.stringify({ type: 'confirm' }));
-        state.pendingToolResults.push({
-            call_id: msg.call_id,
-            result: JSON.stringify(delivered ? { success: true } : { success: false, error: 'not connected to server — try again' }),
-        });
-    } else {
-        dbg('Unhandled tool.call: ' + msg.name);
-        state.pendingToolResults.push({ call_id: msg.call_id, result: JSON.stringify({ success: false, error: 'unknown tool' }) });
-    }
+        entry.result = JSON.stringify({ success: true });
+    }, error => {
+        entry.result = JSON.stringify({ success: false, error: error.message });
+        entry.is_error = true;
+    }).then(() => {
+        if (generation !== state.voiceGeneration || entry.cancelled || !entry.result) return;
+        state.pendingToolResults.push(entry);
+        flushPendingToolResults();
+    });
+    return entry.promise;
 }
 
 function flushPendingToolResults() {
-    if (!state.pendingToolResults.length) return;
-    for (const tr of state.pendingToolResults) {
-        if (state.aaiWs?.readyState === 1) {
-            state.aaiWs.send(JSON.stringify({ type: 'tool.result', call_id: tr.call_id, result: tr.result }));
-        }
-    }
+    // https://www.assemblyai.com/docs/voice-agents/voice-agent-api/events-reference#toolresult
+    // An ACK can arrive after reply.done: still wait if another AAI event intervened.
+    if (state.lastAAIEvent !== 'reply.done' || state.aaiWs?.readyState !== 1) return;
+    const pending = state.pendingToolResults;
     state.pendingToolResults = [];
+    for (const entry of pending) {
+        if (entry.generation !== state.voiceGeneration || entry.cancelled || entry.sent) continue;
+        try {
+            state.aaiWs.send(JSON.stringify({ type: 'tool.result', call_id: entry.call_id,
+                result: entry.result, is_error: !!entry.is_error }));
+            entry.sent = true;
+        } catch (_) { state.pendingToolResults.push(entry); }
+    }
 }
 
 // ── Voice prompts ────────────────────────────────────────────────────────
@@ -838,20 +944,21 @@ Do NOT ask any interview questions yet — the questionnaire happens later, once
 function buildInterviewPrompt() {
     const ocrName = state.ocrData?.name || '';
     const ocrFields = state.ocrData ? Object.entries(state.ocrData).filter(([k, v]) => v && k !== 'name').map(([k, v]) => `${k}: ${v}`).join(', ') : '';
-    const ocrSection = ocrName
+    const ocrSection = ocrName && !state.resumed
         ? `\nID SCAN RESULT:\n- Name: ${ocrName}${ocrFields ? '\n- ' + ocrFields : ''}\n\nSTEP 1 (do this first, before any numbered question): thank the visitor by name — say something like "Thank you, Mr./Ms. ${ocrName}!" — then read back the data above and ask "Is this correct?" Wait for a yes or no. Do NOT call submit_answer for this — it is not one of the numbered questions. If they say ANY field is wrong, ask them to state the correct value, then immediately call correct_ocr_field with that field and the corrected value — do this for every field they correct, before moving on to STEP 2.`
         : '';
     const questionsList = (state.questions || []).map((q, i) => `${i + 1}. "${q.text}" (field: ${q.field})`).join('\n');
 
     return `You are a friendly virtual reception assistant at ${state.businessName || 'this office'}.
 ${personaLine()}${ocrSection}
+${state.resumed ? `RESTORED SESSION: current phase ${state.fsmState}; next question number ${state.currentQuestionIndex + 1}. Already saved answers: ${JSON.stringify(state.answers)}. Do not repeat answered questions or the ID check. Continue at the first unanswered question; if confirming, read the existing summary and ask for confirmation. If uploading_documents, wait for the screen controls.` : ''}
 
 STEP 2 — QUESTIONS (ask ONE AT A TIME, in order, only after the ID scan is confirmed):
 ${questionsList}
 
 FLOW:
 ${ocrSection ? '1. Do STEP 1 (confirm ID scan) first\n2. Then STEP 2' : '1. Start with STEP 2'}
-- For each question: ask it, wait for the answer, confirm briefly ("Got it", "Understood", "Perfect"), then call submit_answer with that question's field and their answer, then move to the next question
+- For each question: ask it, wait for the answer, call submit_answer with that question's field and their answer, and wait for a successful tool result before acknowledging it or moving on. If a tool fails, explain that the result is unconfirmed and offer a retry; never claim it was saved.
 - After all questions, summarize everything and ask "Is everything correct?" Once the visitor says yes, call confirm_registration — this is the ONLY way the check-in actually finishes, so never skip it. If they say a numbered answer is wrong instead — even after hearing the summary — call submit_answer again with that question's field and the corrected value (this replaces the old answer, it does not add a new one), then summarize again and ask once more. Use correct_ocr_field only for ID scan data, never for a numbered question.
 
 RULES:
@@ -904,6 +1011,9 @@ function buildInterviewTools() {
 // One-shot instructions for reply.create — see sendInterviewHandoff for why
 // this is needed at all (session.update alone doesn't make the agent speak).
 function buildInterviewHandoffInstructions() {
+    if (state.resumed) return state.fsmState === 'confirming'
+        ? 'Read back the saved summary, then ask if it is correct. Do not restart the questions.'
+        : 'Continue from the next unanswered question in the restored session. Do not repeat the ID check or any saved answer.';
     const ocrName = state.ocrData?.name || '';
     return ocrName
         ? `Say thank you to the visitor by name — "Thank you, Mr./Ms. ${ocrName}!" — then read back the ID scan data and ask "Is this correct?" Wait for their answer before doing anything else.`
@@ -915,6 +1025,7 @@ function buildInterviewHandoffInstructions() {
 // OCR-timeout fallback in uploadAndProcess, so both actually reach the
 // interview instead of leaving the agent stuck on the greeting-only prompt.
 function proceedToInterview() {
+    if (state.interviewHandoffGeneration === state.voiceGeneration) return;
     state.scanCompleted = true;
     state.pendingInterviewHandoff = true;
     dbg('scanCompleted=true aaiReady=' + state.aaiReady + ' voiceConnecting=' + state.voiceConnecting);
@@ -934,7 +1045,8 @@ function proceedToInterview() {
 }
 
 function sendInterviewHandoff() {
-    if (state.aaiWs?.readyState !== 1) return;
+    if (state.aaiWs?.readyState !== 1 || state.interviewHandoffGeneration === state.voiceGeneration) return;
+    state.interviewHandoffGeneration = state.voiceGeneration;
     dbg('Sending interview handoff via session.update');
     state.micMuted = false; // scan is confirmed — let the mic through again
     state.aaiWs.send(JSON.stringify({
@@ -999,9 +1111,20 @@ async function uploadDocuments(fileList) {
     }
 }
 
-function finishDocumentsStep() {
-    state.micMuted = false;
-    if (state.doWs?.readyState === 1) state.doWs.send(JSON.stringify({ type: 'documents_done' }));
+async function finishDocumentsStep() {
+    const sessionId = state.sessionId, generation = state.voiceGeneration;
+    if (!state.documentsOperationId) state.documentsOperationId = crypto.randomUUID();
+    if (elements.btnDocumentsContinue) elements.btnDocumentsContinue.disabled = true;
+    try {
+        await requestOperation('documents_done', {}, state.documentsOperationId);
+        if (sessionId !== state.sessionId || generation !== state.voiceGeneration || state.checkinDone) return;
+        state.micMuted = false;
+    } catch (err) {
+        if (sessionId !== state.sessionId || generation !== state.voiceGeneration || state.checkinDone) return;
+        if (err.confirmedFailure && !err.retryable) state.documentsOperationId = null;
+        if (elements.btnDocumentsContinue) elements.btnDocumentsContinue.disabled = false;
+        updateStatus(err.message);
+    }
 }
 
 // ── Helpers ────────────────────────────────────────────────────────────────
@@ -1032,13 +1155,13 @@ function displayOCRResult(fields) {
 }
 
 function showSummary(answers, ocr) {
-    // Confirmed regression: reaching the summary right after the (optional)
-    // documents step left step-documents showing — the summary text and the
-    // confirm button both live in step-voice, so they rendered invisibly
-    // behind whatever screen was still up. Every other path into summary
-    // (no scan, or after the ID scan) already happened to be on step-voice
-    // already; this one didn't.
+    // The summary and its confirmation button live on the voice screen,
+    // including when arriving from the optional documents step.
     showStep('voice');
+    state.fsmState = 'confirming';
+    state.answers = answers || state.answers;
+    state.ocrData = ocr || state.ocrData;
+    if (elements.btnConfirmSummary) elements.btnConfirmSummary.disabled = false;
     updateStatus('Review your check-in');
     let s = '📋 Summary:\n';
     if (answers) for (const [q, a] of Object.entries(answers)) s += `• ${q}: ${a}\n`;
@@ -1057,6 +1180,8 @@ function hideSummaryActions() {
 }
 
 function showDone(registrationId) {
+    state.fsmState = 'done';
+    clearTimeout(doReconnectTimer);
     state.checkinDone = true; // stop the DO WS reconnect loop from firing after a normal finish
     // This visitor's session is finished — a later reload or the next
     // visitor on this device must never resume into a completed check-in.
@@ -1069,21 +1194,43 @@ function showDone(registrationId) {
 }
 
 function cleanupAudio() {
-    state.aaiReady = false;
-    state.voiceConnecting = false;
-    if (state.aaiWs?.readyState === 1) {
-        try { state.aaiWs.send(JSON.stringify({ type: 'session.end' })); } catch (_) {}
-        setTimeout(() => { try { state.aaiWs?.close(); } catch (_) {} state.aaiWs = null; }, 2000);
-    } else {
-        state.aaiWs = null;
+    state.audioAbort?.abort(); state.audioAbort = null;
+    state.voiceGeneration++;
+    state.aaiReady = false; state.voiceConnecting = false;
+    clearTimeout(state.voiceTimer); clearTimeout(state.ocrTimeout);
+    state.lastAAIEvent = null; state.replyNumber = 0;
+    state.pendingToolResults = []; state.toolCalls.clear();
+    rejectPendingOperations('Session ended before server confirmation');
+    const ws = state.aaiWs; state.aaiWs = null;
+    if (ws) {
+        if (ws.readyState === 1) {
+            try { ws.send(JSON.stringify({ type: 'session.end' })); } catch (_) {}
+            setTimeout(() => { try { ws.close(); } catch (_) {} }, 2000);
+        } else { try { ws.close(); } catch (_) {} }
     }
-    state.playback?.port.postMessage('stop');
-    state.mic?.getTracks().forEach(t => t.stop());
-    state.captureCtx?.close(); state.playbackCtx?.close();
-    state.captureCtx = state.playbackCtx = state.playback = state.mic = null;
+    state.captureNode && (state.captureNode.port.onmessage = null);
+    try { state.captureNode?.disconnect(); state.captureSource?.disconnect(); } catch (_) {}
+    state.captureNode = state.captureSource = null;
+    state.mic?.getTracks().forEach(track => track.stop()); state.mic = null;
+    state.playback?.port.postMessage('stop'); state.playback = null;
+    for (const ctx of [state.captureCtx, state.playbackCtx]) {
+        if (ctx) { try { Promise.resolve(ctx.close()).catch(() => {}); } catch (_) {} }
+    }
+    state.captureCtx = state.playbackCtx = null;
 }
 
-// ── Events ─────────────────────────────────────────────────────────────────
+async function confirmSummary() {
+    const sessionId = state.sessionId, generation = state.voiceGeneration;
+    if (!state.manualConfirmOperationId) state.manualConfirmOperationId = crypto.randomUUID();
+    if (elements.btnConfirmSummary) elements.btnConfirmSummary.disabled = true;
+    try { await requestOperation('confirm', {}, state.manualConfirmOperationId); }
+    catch (err) {
+        if (sessionId !== state.sessionId || generation !== state.voiceGeneration || state.checkinDone) return;
+        if (err.confirmedFailure && !err.retryable) state.manualConfirmOperationId = null;
+        if (elements.btnConfirmSummary) elements.btnConfirmSummary.disabled = false;
+        updateStatus(err.message);
+    }
+}
 
 function initEventListeners() {
     // Take a photo (capture="environment" opens the device's native camera
@@ -1108,13 +1255,17 @@ function initEventListeners() {
         elements.btnDocumentsContinue.disabled = true;
         finishDocumentsStep();
     });
-    elements.btnConfirmSummary?.addEventListener('click', () => {
-        elements.btnConfirmSummary.disabled = true;
-        dbg('Manual confirm button pressed');
-        if (state.doWs?.readyState === 1) state.doWs.send(JSON.stringify({ type: 'confirm' }));
-    });
+    elements.btnConfirmSummary?.addEventListener('click', confirmSummary);
+
     elements.btnNewVisitor?.addEventListener('click', () => {
         state.answers = {}; state.ocrData = null;
+        cleanupAudio();
+        rejectPendingOperations('New visitor');
+        clearTimeout(doReconnectTimer); doReconnectAttempts = 0;
+        state.sessionId = null; state.resumed = false; state.fsmState = 'idle';
+        state.manualConfirmOperationId = state.documentsOperationId = null;
+        state.currentQuestionIndex = 0;
+        try { sessionStorage.removeItem(SESSION_STORAGE_KEY); } catch (_) {}
         // Without this reset, a new visitor whose business also requires an
         // ID scan would skip straight to the interview prompt on connect,
         // since scanCompleted/requiresIdScan would still carry over true
@@ -1132,7 +1283,7 @@ function initEventListeners() {
         if (elements.btnConfirmSummary) elements.btnConfirmSummary.disabled = false;
         hideSummaryActions();
         if (elements.transcriptMessages) elements.transcriptMessages.innerHTML = '';
-        cleanupAudio(); if (state.doWs) { state.doWs.close(); state.doWs = null; }
+        const old = state.doWs; state.doWs = null; old?.close();
         // cleanupAudio() just tore down the AudioContexts/mic stream — the
         // NEXT visitor needs their own real tap to reactivate audio, same
         // reason the very first visitor needs step-start. Auto-reconnecting
@@ -1141,10 +1292,17 @@ function initEventListeners() {
         if (elements.btnStart) {
             elements.btnStart.disabled = false;
             elements.btnStart.textContent = '🎤 Tap to Start';
-            elements.btnStart.addEventListener('click', startCheckin, { once: true });
+            // The Start listener is persistent; startPending prevents double activation.
         }
     });
     window.addEventListener('beforeunload', () => { cleanupAudio(); state.doWs?.close(); });
 }
 
 if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init); else init();
+// Explicit module exports let the dependency-free regression suite exercise the
+// same functions as the browser; no alternate test implementation or auto-start.
+export const __testing = { state, elements, startCheckin, primeAudio, cleanupAudio,
+    handleDOMessage, handleAAILogic, queueToolResult, connectToDO, reconnectToDO,
+    proceedToInterview, sendInterviewHandoff, showDone, initEventListeners,
+    requestOperation, flushPendingToolResults, buildInterviewPrompt, finishDocumentsStep,
+    confirmSummary, SESSION_STORAGE_KEY, SESSION_TTL_MS };
