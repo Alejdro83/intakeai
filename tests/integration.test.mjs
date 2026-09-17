@@ -97,7 +97,7 @@ test('five answers, correction and manual confirmation persist the exact SQLite 
   await f.confirm();
   const rows=f.db.prepare('SELECT * FROM guest_registrations').all();
   assert.equal(rows.length,1);
-  assert.equal(JSON.parse(rows[0].answers_json).q1,'corrected synthetic answer');
+  assert.equal(JSON.parse(rows[0].answers_json).field1,'corrected synthetic answer');
   assert.equal(Object.keys(JSON.parse(rows[0].answers_json)).length,5);
   assert.equal(f.h.app.state.checkinDone,true);
   assert.equal(f.h.app.elements.confirmMessage.textContent,'Your check-in is complete!');

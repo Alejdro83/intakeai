@@ -18,7 +18,7 @@ function fixture(t, { fsmState = 'asking_questions', requiresDocuments = false }
   let durable = { businessId: 'business-one', fsmState, businessConfig: config, questions, currentQuestionIndex: 0,
     answers: {}, ocrData: { name: 'Synthetic Visitor' }, operationReceipts: {}, pendingRegistration: null };
   if (fsmState === 'confirming' || fsmState === 'uploading_documents') {
-    durable.currentQuestionIndex = 2; durable.answers = { q1: 'one', q2: 'two' };
+    durable.currentQuestionIndex = 2; durable.answers = { first: 'one', second: 'two' };
   }
   const storage = {
     puts: 0, failPut: null,
@@ -72,7 +72,7 @@ test('ACK follows durable answer+receipt and precedes next question', async t =>
   const send = f.ws.send;
   f.ws.send = function(raw) {
     if (JSON.parse(raw).type === 'operation_result') {
-      assert.equal(f.durable.answers.q1, message.text);
+      assert.equal(f.durable.answers.first, message.text);
       assert.equal(f.durable.operationReceipts[message.operation_id].result.success, true);
     }
     send.call(this, raw);
@@ -133,7 +133,7 @@ test('reusing ID with changed content is rejected without changing saved answer'
   await f.send({ ...message, text: 'changed synthetic answer' });
   assert.equal(results(f)[0].success, false);
   assert.match(results(f)[0].error, /different content/);
-  assert.equal(f.durable.answers.q1, message.text);
+  assert.equal(f.durable.answers.first, message.text);
 });
 
 test('validation errors are explicit and their dedupe survives restart', async t => {
@@ -158,8 +158,8 @@ test('blank answers and attempts to skip to a later question return failure', as
 test('correction at summary preserves position and ACK precedes refreshed summary', async t => {
   const f = fixture(t, { fsmState: 'confirming' });
   await f.send(answer(randomUUID(), 'first', 'corrected synthetic'));
-  assert.equal(f.durable.answers.q1, 'corrected synthetic');
-  assert.equal(f.durable.answers.q2, 'two');
+  assert.equal(f.durable.answers.first, 'corrected synthetic');
+  assert.equal(f.durable.answers.second, 'two');
   assert.equal(f.durable.currentQuestionIndex, 2);
   assert.deepEqual(f.ws.sent.map(x => x.type), ['operation_result', 'summary']);
 });
@@ -260,7 +260,7 @@ test('resume restores full public state before announcing the current step', asy
   assert.equal(restored.business_id, 'business-one'); assert.equal(restored.business_name, 'Synthetic Clinic');
   assert.equal(restored.welcome_message, 'Synthetic welcome'); assert.equal(restored.voice_id, 'anna');
   assert.equal(restored.voice_persona, 'concise'); assert.equal(restored.requires_id_scan, true);
-  assert.equal(restored.current_question_index, 1); assert.equal(restored.answers.q1, 'synthetic answer');
+  assert.equal(restored.current_question_index, 1); assert.equal(restored.answers.first, 'synthetic answer');
   assert.equal(restored.ocr_data.name, 'Synthetic Visitor'); assert.equal(restored.state, 'asking_questions');
   assert.deepEqual(restored.questions[0], { id: 'q1', text: 'Synthetic question one?', type: 'text', field: 'first' });
   assert.deepEqual(f.ws.sent.map(x => x.type), ['session_restored', 'state']);

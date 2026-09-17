@@ -596,7 +596,7 @@ export class CheckinSession {
       return this._error(ws, "Answer the current question before a later question");
     }
 
-    this.session.answers[targetQ.id || targetQ.field_key] = text;
+    this.session.answers[targetQ.field_key] = text;
 
     const isSequentialAdvance = this.session.fsmState === "asking_questions" && currentQ && targetQ === currentQ;
     if (isSequentialAdvance) {

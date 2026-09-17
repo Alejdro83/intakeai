@@ -90,7 +90,7 @@ const state = {
     documentsUploadedCount: 0,
     audioAbort: null, startPending: false, voiceGeneration: 0,
     captureNode: null, captureSource: null, voiceTimer: null,
-    lastAAIEvent: null, replyNumber: 0, toolCalls: new Map(), operations: new Map(),
+    lastAAIEvent: null, replyDoneSinceLastFlush: false, replyNumber: 0, toolCalls: new Map(), operations: new Map(),
     interviewHandoffGeneration: -1, fsmState: 'idle', resumed: false,
     currentQuestionIndex: 0, manualConfirmOperationId: null, documentsOperationId: null,
     // True once the DO has moved past scanning (questions_ready received),
@@ -831,6 +831,7 @@ function handleAAILogic(msg) {
 
         case 'reply.started': state.replyNumber++; updateStatus('Speaking...'); break;
         case 'reply.done':
+            state.replyDoneSinceLastFlush = true;
             updateStatus('Listening...');
             if (msg.status === 'interrupted') {
                 // Per AssemblyAI docs: discard any tool.result queued during a reply
@@ -893,17 +894,20 @@ function queueToolResult(msg) {
 function flushPendingToolResults() {
     // https://www.assemblyai.com/docs/voice-agents/voice-agent-api/events-reference#toolresult
     // An ACK can arrive after reply.done: still wait if another AAI event intervened.
-    if (state.lastAAIEvent !== 'reply.done' || state.aaiWs?.readyState !== 1) return;
+    if (!state.replyDoneSinceLastFlush || state.aaiWs?.readyState !== 1) return;
     const pending = state.pendingToolResults;
     state.pendingToolResults = [];
+    let sent = false;
     for (const entry of pending) {
         if (entry.generation !== state.voiceGeneration || entry.cancelled || entry.sent) continue;
         try {
             state.aaiWs.send(JSON.stringify({ type: 'tool.result', call_id: entry.call_id,
                 result: entry.result, is_error: !!entry.is_error }));
             entry.sent = true;
+            sent = true;
         } catch (_) { state.pendingToolResults.push(entry); }
     }
+    if (sent) state.replyDoneSinceLastFlush = false;
 }
 
 // ── Voice prompts ────────────────────────────────────────────────────────
