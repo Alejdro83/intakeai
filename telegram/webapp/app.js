@@ -829,7 +829,7 @@ function handleAAILogic(msg) {
             break;
         }
 
-        case 'reply.started': state.replyNumber++; updateStatus('Speaking...'); break;
+        case 'reply.started': state.replyNumber++; state.replyDoneSinceLastFlush = false; updateStatus('Speaking...'); break;
         case 'reply.done':
             state.replyDoneSinceLastFlush = true;
             updateStatus('Listening...');
