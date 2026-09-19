@@ -13,6 +13,12 @@
 Submission for lablab.ai's **AssemblyAI Voice Agent Hackathon**
 (1–30 Sep 2026).
 
+**For judges:** [Business directory](https://intakeai-col.pages.dev/admin-panel-view.html) —
+a public, read-only view of how each business is configured (welcome
+message, questions), no login needed. It's not the real admin panel: that one
+requires a Telegram session and is intentionally locked down, since it can
+create/edit/delete real businesses and see visitors' personal data.
+
 > **Scan documents, ask questions, register visitors — all by voice.**
 
 Virtualobby is a universal reception agent powered by AssemblyAI's Voice Agent API. It combines voice interaction with document scanning (OCR) to automate visitor registration for any business.
@@ -119,7 +125,9 @@ any static host, pointed at your Worker's URL via `CONFIG.API_URL` in `app.js`.
 
 - Visitor check-in: your Pages URL, or as a Telegram Mini App via
   `https://t.me/<your_bot>?start=business_<id>`
-- Admin panel: `<your-pages-url>/admin.html`
+- Admin panel: `<your-pages-url>/admin.html` (Telegram-authenticated)
+- Read-only business directory: `<your-pages-url>/admin-panel-view.html`
+  (public, no login — see "For judges" above)
 
 ## 📁 Project Structure
 
