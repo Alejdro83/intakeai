@@ -264,6 +264,39 @@ export default {
       return new Response(doResp.body, { status: doResp.status, headers });
     }
 
+    // ── Businesses: public read-only directory (for admin-panel-view.html) ──
+    // Deliberately unauthenticated: every field returned here is something a
+    // real visitor already hears/reads during check-in anyway (business
+    // name, welcome message, the questions asked out loud) — nothing an
+    // admin-only endpoint doesn't already expose to a stranger by design.
+    // Explicit column list, never SELECT * — webhook_url/webhook_secret must
+    // never reach this response, and never will even if new columns are
+    // added to businesses later.
+    if (path === '/api/businesses/public' && method === 'GET') {
+      try {
+        const [{ results: businesses }, { results: questions }] = await Promise.all([
+          env.DB.prepare(
+            'SELECT id, name, business_type, welcome_message, requires_id_scan, requires_documents, documents_prompt FROM businesses'
+          ).all(),
+          env.DB.prepare(
+            'SELECT business_id, field_key, question_text, order_index, validation_type FROM business_questions ORDER BY business_id, order_index'
+          ).all(),
+        ]);
+        const questionsByBusiness = new Map();
+        for (const q of questions) {
+          if (!questionsByBusiness.has(q.business_id)) questionsByBusiness.set(q.business_id, []);
+          questionsByBusiness.get(q.business_id).push({
+            field: q.field_key, text: q.question_text, type: q.validation_type,
+          });
+        }
+        return jsonResponse({
+          businesses: businesses.map((b) => ({ ...b, questions: questionsByBusiness.get(b.id) || [] })),
+        });
+      } catch (e) {
+        return jsonResponse({ error: e.message }, 500);
+      }
+    }
+
     // ── Businesses: list all ──
     if (path === '/api/businesses' && method === 'GET') {
       // Confirmed bug (external review, 2026-09): this had no auth at all,
