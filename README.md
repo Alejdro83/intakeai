@@ -41,6 +41,15 @@ Virtualobby is a universal reception agent powered by AssemblyAI's Voice Agent A
 | 🏢 `office` | Office visitor registration |
 | 🎪 `event` | Event attendee registration |
 
+## 🚪 Two ways to deploy
+
+Same engine, two front doors — the name is literal:
+
+- **On-site kiosk** — a tablet or phone at your actual front desk, walk-up check-in.
+- **Virtual lobby** — no location at all. Send the same link to someone
+  remotely, days ahead of an appointment: a law firm's client explains their
+  case and uploads documents by voice before ever walking into the office.
+
 ## 📱 WebApp (Mobile-First)
 
 The webapp works as:
