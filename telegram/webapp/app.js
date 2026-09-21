@@ -106,7 +106,7 @@ const state = {
     micMuted: false,
     // Per-business voice config, set from the DO's welcome message.
     welcomeMessage: '', voiceId: 'anna', voicePersona: '',
-    cameraStream: null,
+    cameraStream: null, cameraAvailable: false,
 };
 
 const $ = (id) => document.getElementById(id) || document.querySelector(`.${id}`);
@@ -123,6 +123,11 @@ const elements = {
     documentsPrompt: $('documents-prompt'), documentsUpload: $('documents-upload'),
     documentsUploadedCount: $('documents-uploaded-count'), btnDocumentsContinue: $('btn-documents-continue'),
     cameraCapture: $('camera-capture'),
+    cameraPreviewContainer: $('camera-preview-container'),
+    cameraPreview: $('camera-preview'),
+    btnCapture: $('btn-capture'),
+    btnCancelCamera: $('btn-cancel-camera'),
+    cameraFallback: $('camera-fallback'),
 };
 
 // ── Helpers ────────────────────────────────────────────────────────────────
@@ -139,6 +144,17 @@ function showStep(step) {
     [{ scan: elements.stepScan, voice: elements.stepVoice, documents: elements.stepDocuments, confirm: elements.stepConfirm }].forEach(steps => {
         for (const [k, el] of Object.entries(steps)) if (el) el.classList.toggle('hidden', k !== step);
     });
+    // When the scan step is shown, wire up the camera preview if available
+    if (step === 'scan') {
+        if (state.cameraAvailable && state.cameraStream) {
+            elements.cameraFallback?.classList.add('hidden');
+            elements.cameraPreviewContainer?.classList.remove('hidden');
+            if (elements.cameraPreview) elements.cameraPreview.srcObject = state.cameraStream;
+        } else {
+            elements.cameraFallback?.classList.remove('hidden');
+            elements.cameraPreviewContainer?.classList.add('hidden');
+        }
+    }
 }
 
 function addMessage(who, text) {
@@ -226,6 +242,20 @@ async function primeAudio() {
         throw new Error('Audio start cancelled');
     }
     Object.assign(state, audio);
+
+    // Request camera in the same user gesture as mic (required for Telegram WebView)
+    try {
+        const camStream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' }, audio: false });
+        if (state.audioAbort !== controller || controller.signal.aborted) {
+            camStream.getTracks().forEach(t => t.stop());
+        } else {
+            state.cameraStream = camStream;
+            state.cameraAvailable = true;
+        }
+    } catch (camErr) {
+        dbg('Camera not available: ' + camErr.message);
+        state.cameraAvailable = false;
+    }
 }
 
 // ── DO WebSocket ───────────────────────────────────────────────────────────
@@ -627,13 +657,41 @@ async function uploadAndProcess(blobOrFile, contentType) {
 
 // ── Camera ────────────────────────────────────────────────────────────────
 
-// stopCamera/startCamera/capturePhoto are kept as no-ops for backward
-// compatibility (tests and __testing export reference them), but the primary
-// camera path is now the <input type="file" capture="environment"> element
-// which opens the native camera directly — no getUserMedia needed.
-function stopCamera() {}
-async function startCamera() { elements.cameraCapture?.click(); }
-function capturePhoto() {}
+function stopCamera() {
+    if (state.cameraStream) {
+        state.cameraStream.getTracks().forEach(t => t.stop());
+        state.cameraStream = null;
+        state.cameraAvailable = false;
+    }
+    if (elements.cameraPreview) elements.cameraPreview.srcObject = null;
+    elements.cameraPreviewContainer?.classList.add('hidden');
+    elements.cameraFallback?.classList.remove('hidden');
+}
+
+async function startCamera() {
+    // If we already have a camera stream (from primeAudio), just show the preview
+    if (state.cameraAvailable && state.cameraStream) {
+        elements.cameraFallback?.classList.add('hidden');
+        elements.cameraPreviewContainer?.classList.remove('hidden');
+        if (elements.cameraPreview) elements.cameraPreview.srcObject = state.cameraStream;
+    } else {
+        // Fallback: use file input with capture attribute
+        elements.cameraCapture?.click();
+    }
+}
+
+function capturePhoto() {
+    const video = elements.cameraPreview;
+    if (!video || !state.cameraStream) return;
+    const canvas = document.createElement('canvas');
+    canvas.width = video.videoWidth;
+    canvas.height = video.videoHeight;
+    canvas.getContext('2d').drawImage(video, 0, 0);
+    canvas.toBlob((blob) => {
+        if (blob) uploadAndProcess(blob, 'image/jpeg');
+    }, 'image/jpeg', 0.85);
+    // Do NOT stop camera tracks — user might need to retake
+}
 
 // ── AssemblyAI Voice ───────────────────────────────────────────────────────
 
@@ -1223,6 +1281,7 @@ function showDone(registrationId) {
 
 function cleanupAudio() {
     stopCamera();
+    state.cameraStream?.getTracks().forEach(t => t.stop()); state.cameraStream = null; state.cameraAvailable = false;
     state.audioAbort?.abort(); state.audioAbort = null;
     state.voiceGeneration++;
     state.aaiReady = false; state.voiceConnecting = false;
@@ -1267,6 +1326,14 @@ function initEventListeners() {
         const file = e.target.files?.[0];
         if (file) uploadAndProcess(file, file.type);
         e.target.value = '';
+    });
+    // Live camera capture button (shown when camera stream is available from primeAudio)
+    elements.btnCapture?.addEventListener('click', () => capturePhoto());
+    // Cancel camera preview: hide preview, show fallback file-input buttons
+    elements.btnCancelCamera?.addEventListener('click', () => {
+        elements.cameraPreviewContainer?.classList.add('hidden');
+        elements.cameraFallback?.classList.remove('hidden');
+        if (elements.cameraPreview) elements.cameraPreview.srcObject = null;
     });
     $('file-upload')?.addEventListener('change', (e) => {
         const file = e.target.files?.[0];
