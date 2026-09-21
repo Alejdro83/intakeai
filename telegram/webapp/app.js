@@ -657,15 +657,19 @@ async function uploadAndProcess(blobOrFile, contentType) {
 
 // ── Camera ────────────────────────────────────────────────────────────────
 
+function hideCameraPreview() {
+    if (elements.cameraPreview) elements.cameraPreview.srcObject = null;
+    elements.cameraPreviewContainer?.classList.add('hidden');
+    elements.cameraFallback?.classList.remove('hidden');
+}
+
 function stopCamera() {
     if (state.cameraStream) {
         state.cameraStream.getTracks().forEach(t => t.stop());
         state.cameraStream = null;
         state.cameraAvailable = false;
     }
-    if (elements.cameraPreview) elements.cameraPreview.srcObject = null;
-    elements.cameraPreviewContainer?.classList.add('hidden');
-    elements.cameraFallback?.classList.remove('hidden');
+    hideCameraPreview();
 }
 
 async function startCamera() {
