@@ -257,6 +257,27 @@ body.telegram-webapp {
     justify-content: center;
 }
 
+.camera-preview {
+    width: 100%;
+    max-height: 300px;
+    border-radius: var(--radius-sm);
+    overflow: hidden;
+    margin-bottom: 12px;
+}
+
+.camera-preview video {
+    width: 100%;
+    object-fit: cover;
+    border-radius: var(--radius-sm);
+}
+
+.camera-preview .camera-controls {
+    display: flex;
+    gap: 12px;
+    justify-content: center;
+    padding: 12px 0;
+}
+
 /* ── OCR Result ──────────────────────────────────────────────────── */
 
 .ocr-result {

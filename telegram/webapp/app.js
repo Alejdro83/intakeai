@@ -106,6 +106,7 @@ const state = {
     micMuted: false,
     // Per-business voice config, set from the DO's welcome message.
     welcomeMessage: '', voiceId: 'anna', voicePersona: '',
+    cameraStream: null,
 };
 
 const $ = (id) => document.getElementById(id) || document.querySelector(`.${id}`);
@@ -121,6 +122,8 @@ const elements = {
     btnNewVisitor: $('btn-new-visitor'), confirmMessage: $('confirm-message'), confirmId: $('confirm-id'),
     documentsPrompt: $('documents-prompt'), documentsUpload: $('documents-upload'),
     documentsUploadedCount: $('documents-uploaded-count'), btnDocumentsContinue: $('btn-documents-continue'),
+    btnTakePhoto: $('btn-take-photo'), cameraPreviewContainer: $('camera-preview-container'),
+    cameraPreview: $('camera-preview'), btnCapture: $('btn-capture'), btnCancelCamera: $('btn-cancel-camera'),
 };
 
 // ── Helpers ────────────────────────────────────────────────────────────────
@@ -133,6 +136,7 @@ function updateStatus(text) {
 
 function showStep(step) {
     dbg('STEP → ' + step);
+    if (step !== 'scan') stopCamera();
     [{ scan: elements.stepScan, voice: elements.stepVoice, documents: elements.stepDocuments, confirm: elements.stepConfirm }].forEach(steps => {
         for (const [k, el] of Object.entries(steps)) if (el) el.classList.toggle('hidden', k !== step);
     });
@@ -620,6 +624,54 @@ async function uploadAndProcess(blobOrFile, contentType) {
         updateStatus('Upload failed: ' + err.message);
         elements.ocrLoading?.classList.add('hidden');
     }
+}
+
+// ── Camera (getUserMedia) ─────────────────────────────────────────────────
+
+function stopCamera() {
+    if (state.cameraStream) {
+        state.cameraStream.getTracks().forEach(track => track.stop());
+        state.cameraStream = null;
+    }
+    if (elements.cameraPreview) elements.cameraPreview.srcObject = null;
+    elements.cameraPreviewContainer?.classList.add('hidden');
+    elements.btnTakePhoto?.classList.remove('hidden');
+}
+
+async function startCamera() {
+    try {
+        const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' }, audio: false });
+        state.cameraStream = stream;
+        if (elements.cameraPreview) elements.cameraPreview.srcObject = stream;
+        elements.cameraPreviewContainer?.classList.remove('hidden');
+        elements.btnTakePhoto?.classList.add('hidden');
+    } catch (err) {
+        dbg('getUserMedia failed, falling back to file input: ' + err.message);
+        // Fall back to file input — create a hidden one on the fly
+        const fallback = document.createElement('input');
+        fallback.type = 'file'; fallback.accept = 'image/*';
+        fallback.style.display = 'none';
+        document.body.appendChild(fallback);
+        fallback.addEventListener('change', () => {
+            const file = fallback.files?.[0];
+            if (file) uploadAndProcess(file, file.type);
+            fallback.remove();
+        }, { once: true });
+        fallback.click();
+    }
+}
+
+function capturePhoto() {
+    const video = elements.cameraPreview;
+    if (!video) return;
+    const canvas = document.createElement('canvas');
+    canvas.width = video.videoWidth;
+    canvas.height = video.videoHeight;
+    canvas.getContext('2d').drawImage(video, 0, 0);
+    stopCamera();
+    canvas.toBlob((blob) => {
+        if (blob) uploadAndProcess(blob, 'image/jpeg');
+    }, 'image/jpeg', 0.85);
 }
 
 // ── AssemblyAI Voice ───────────────────────────────────────────────────────
@@ -1209,6 +1261,7 @@ function showDone(registrationId) {
 }
 
 function cleanupAudio() {
+    stopCamera();
     state.audioAbort?.abort(); state.audioAbort = null;
     state.voiceGeneration++;
     state.aaiReady = false; state.voiceConnecting = false;
@@ -1248,15 +1301,11 @@ async function confirmSummary() {
 }
 
 function initEventListeners() {
-    // Take a photo (capture="environment" opens the device's native camera
-    // app directly — far more reliable inside the Telegram WebView than an
-    // in-page getUserMedia preview, which is why earlier attempts at that
-    // were reverted) or pick an existing one. Both feed the same upload path.
-    $('camera-capture')?.addEventListener('change', (e) => {
-        const file = e.target.files?.[0];
-        if (file) uploadAndProcess(file, file.type);
-        e.target.value = '';
-    });
+    // Take a photo using getUserMedia camera preview, or fall back to file picker.
+    // Both feed the same upload path.
+    elements.btnTakePhoto?.addEventListener('click', startCamera);
+    elements.btnCapture?.addEventListener('click', capturePhoto);
+    elements.btnCancelCamera?.addEventListener('click', stopCamera);
     $('file-upload')?.addEventListener('change', (e) => {
         const file = e.target.files?.[0];
         if (file) uploadAndProcess(file, file.type);
@@ -1320,4 +1369,4 @@ export const __testing = { state, elements, startCheckin, primeAudio, cleanupAud
     handleDOMessage, handleAAILogic, queueToolResult, connectToDO, reconnectToDO,
     proceedToInterview, sendInterviewHandoff, showDone, initEventListeners,
     requestOperation, flushPendingToolResults, buildInterviewPrompt, finishDocumentsStep,
-    confirmSummary, SESSION_STORAGE_KEY, SESSION_TTL_MS };
+    confirmSummary, SESSION_STORAGE_KEY, SESSION_TTL_MS, stopCamera, startCamera, capturePhoto };
