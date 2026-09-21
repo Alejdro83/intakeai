@@ -1167,10 +1167,24 @@ function sendInterviewHandoff() {
 function announceDocumentsStep(prompt) {
     if (state.aaiWs?.readyState !== 1) return;
     dbg('Announcing documents step via reply.create');
+    // Update system prompt so the agent knows to announce documents even if
+    // reply.create is rejected (e.g. still speaking from the last answer).
     state.aaiWs.send(JSON.stringify({
-        type: 'reply.create',
-        instructions: `Tell the visitor: "${prompt}" Then stay quiet — this step doesn't need you until they finish it.`,
+        type: 'session.update',
+        session: {
+            system_prompt: `You are a friendly virtual reception assistant at ${state.businessName || 'this office'}. The visitor just finished answering all questions. Now tell them: "${prompt}" Then stay quiet — this step doesn't need you until they finish it.`,
+        },
     }));
+    // Delay reply.create to let the agent finish its current reply (e.g.
+    // acknowledging the last submit_answer). Without this delay, the
+    // reply.create is silently rejected because the agent is still speaking.
+    setTimeout(() => {
+        if (state.aaiWs?.readyState !== 1) return;
+        state.aaiWs.send(JSON.stringify({
+            type: 'reply.create',
+            instructions: `Tell the visitor: "${prompt}" Then stay quiet — this step doesn't need you until they finish it.`,
+        }));
+    }, 2000);
 }
 
 async function uploadDocuments(fileList) {
