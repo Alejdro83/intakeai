@@ -122,8 +122,7 @@ const elements = {
     btnNewVisitor: $('btn-new-visitor'), confirmMessage: $('confirm-message'), confirmId: $('confirm-id'),
     documentsPrompt: $('documents-prompt'), documentsUpload: $('documents-upload'),
     documentsUploadedCount: $('documents-uploaded-count'), btnDocumentsContinue: $('btn-documents-continue'),
-    btnTakePhoto: $('btn-take-photo'), cameraPreviewContainer: $('camera-preview-container'),
-    cameraPreview: $('camera-preview'), btnCapture: $('btn-capture'), btnCancelCamera: $('btn-cancel-camera'),
+    cameraCapture: $('camera-capture'),
 };
 
 // ── Helpers ────────────────────────────────────────────────────────────────
@@ -626,53 +625,15 @@ async function uploadAndProcess(blobOrFile, contentType) {
     }
 }
 
-// ── Camera (getUserMedia) ─────────────────────────────────────────────────
+// ── Camera ────────────────────────────────────────────────────────────────
 
-function stopCamera() {
-    if (state.cameraStream) {
-        state.cameraStream.getTracks().forEach(track => track.stop());
-        state.cameraStream = null;
-    }
-    if (elements.cameraPreview) elements.cameraPreview.srcObject = null;
-    elements.cameraPreviewContainer?.classList.add('hidden');
-    elements.btnTakePhoto?.classList.remove('hidden');
-}
-
-async function startCamera() {
-    try {
-        const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' }, audio: false });
-        state.cameraStream = stream;
-        if (elements.cameraPreview) elements.cameraPreview.srcObject = stream;
-        elements.cameraPreviewContainer?.classList.remove('hidden');
-        elements.btnTakePhoto?.classList.add('hidden');
-    } catch (err) {
-        dbg('getUserMedia failed, falling back to file input: ' + err.message);
-        // Fall back to file input — create a hidden one on the fly
-        const fallback = document.createElement('input');
-        fallback.type = 'file'; fallback.accept = 'image/*';
-        fallback.style.display = 'none';
-        document.body.appendChild(fallback);
-        fallback.addEventListener('change', () => {
-            const file = fallback.files?.[0];
-            if (file) uploadAndProcess(file, file.type);
-            fallback.remove();
-        }, { once: true });
-        fallback.click();
-    }
-}
-
-function capturePhoto() {
-    const video = elements.cameraPreview;
-    if (!video) return;
-    const canvas = document.createElement('canvas');
-    canvas.width = video.videoWidth;
-    canvas.height = video.videoHeight;
-    canvas.getContext('2d').drawImage(video, 0, 0);
-    stopCamera();
-    canvas.toBlob((blob) => {
-        if (blob) uploadAndProcess(blob, 'image/jpeg');
-    }, 'image/jpeg', 0.85);
-}
+// stopCamera/startCamera/capturePhoto are kept as no-ops for backward
+// compatibility (tests and __testing export reference them), but the primary
+// camera path is now the <input type="file" capture="environment"> element
+// which opens the native camera directly — no getUserMedia needed.
+function stopCamera() {}
+async function startCamera() { elements.cameraCapture?.click(); }
+function capturePhoto() {}
 
 // ── AssemblyAI Voice ───────────────────────────────────────────────────────
 
@@ -1301,11 +1262,12 @@ async function confirmSummary() {
 }
 
 function initEventListeners() {
-    // Take a photo using getUserMedia camera preview, or fall back to file picker.
-    // Both feed the same upload path.
-    elements.btnTakePhoto?.addEventListener('click', startCamera);
-    elements.btnCapture?.addEventListener('click', capturePhoto);
-    elements.btnCancelCamera?.addEventListener('click', stopCamera);
+    // Camera capture: native file input with capture="environment" opens camera directly
+    elements.cameraCapture?.addEventListener('change', (e) => {
+        const file = e.target.files?.[0];
+        if (file) uploadAndProcess(file, file.type);
+        e.target.value = '';
+    });
     $('file-upload')?.addEventListener('change', (e) => {
         const file = e.target.files?.[0];
         if (file) uploadAndProcess(file, file.type);

@@ -44,16 +44,11 @@
             <p class="step-description">First, let's verify your identity.<br>Take a photo of your ID document, or upload one.</p>
 
             <div class="scan-actions" id="scan-actions">
-                <button class="btn btn-primary btn-scan-main" id="btn-take-photo">📷 Take Photo</button>
+                <!-- Primary: native camera via file input with capture attribute -->
+                <label class="btn btn-primary btn-scan-main" for="camera-capture">📷 Take Photo</label>
+                <input type="file" id="camera-capture" accept="image/*" capture="environment" style="display:none;">
 
-                <div class="camera-preview hidden" id="camera-preview-container">
-                    <video id="camera-preview" autoplay playsinline></video>
-                    <div class="camera-controls">
-                        <button class="btn btn-primary btn-capture" id="btn-capture">📸 Capture</button>
-                        <button class="btn btn-secondary" id="btn-cancel-camera">✕ Cancel</button>
-                    </div>
-                </div>
-
+                <!-- Upload from gallery -->
                 <label class="btn btn-secondary btn-scan-main" for="file-upload">📁 Upload File</label>
                 <input type="file" id="file-upload" accept="image/*" style="display:none;">
             </div>
