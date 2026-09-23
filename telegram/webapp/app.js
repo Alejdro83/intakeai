@@ -104,7 +104,6 @@ const state = {
     // running can't trigger a mid-scan reply that then collides with the
     // interview handoff once OCR finishes.
     micMuted: false,
-    pendingDocumentsPrompt: null, // held request_documents prompt, shown after summary confirmation
     // Per-business voice config, set from the DO's welcome message.
     welcomeMessage: '', voiceId: 'anna', voicePersona: '',
     cameraStream: null, cameraAvailable: false,
@@ -546,11 +545,11 @@ function handleDOMessage(msg) {
 
         case 'request_documents':
             state.fsmState = 'uploading_documents';
-            dbg('Request documents received (held until confirmation): ' + msg.prompt);
-            state.pendingDocumentsPrompt = msg.prompt || '';
-            // Do NOT show the documents step yet — the agent will first summarize
-            // and ask for confirmation. The documents step shows after confirmation.
+            dbg('Request documents received: ' + msg.prompt);
+            if (elements.documentsPrompt) elements.documentsPrompt.textContent = msg.prompt || '';
             state.micMuted = true; // this step is UI-driven, not a voice exchange
+            showStep('documents');
+            announceDocumentsStep(msg.prompt);
             break;
 
         case 'summary': showSummary(msg.answers, msg.ocr); break;
@@ -947,18 +946,7 @@ function queueToolResult(msg) {
     const args = msg.arguments || {};
     if (msg.name === 'submit_answer') { type = 'user_transcript'; payload = { field: args.field, text: args.answer }; }
     else if (msg.name === 'correct_ocr_field') { type = 'ocr_correction'; payload = { field: args.field, value: args.value }; }
-    else if (msg.name === 'confirm_registration') {
-        if (state.pendingDocumentsPrompt) {
-            // Show documents step first — don't allow confirm until documents are done
-            showPendingDocuments();
-            entry.result = JSON.stringify({ success: false, error: 'Documents step is now shown. Ask the visitor to upload documents or skip, then confirm again.' });
-            entry.is_error = true;
-            state.pendingToolResults.push(entry);
-            flushPendingToolResults();
-            return entry.promise;
-        }
-        type = 'confirm'; payload = {};
-    }
+    else if (msg.name === 'confirm_registration') { type = 'confirm'; payload = {}; }
     const operation = type ? requestOperation(type, payload) : Promise.reject(new Error('Unknown tool'));
     entry.promise = operation.then(() => {
         if (generation !== state.voiceGeneration || entry.cancelled) return;
@@ -1329,26 +1317,12 @@ function cleanupAudio() {
     state.captureCtx = state.playbackCtx = null;
 }
 
-function showPendingDocuments() {
-    if (!state.pendingDocumentsPrompt) return;
-    const prompt = state.pendingDocumentsPrompt;
-    state.pendingDocumentsPrompt = null;
-    dbg('Showing pending documents step: ' + prompt);
-    if (elements.documentsPrompt) elements.documentsPrompt.textContent = prompt;
-    showStep('documents');
-    announceDocumentsStep(prompt);
-}
-
 async function confirmSummary() {
     const sessionId = state.sessionId, generation = state.voiceGeneration;
     if (!state.manualConfirmOperationId) state.manualConfirmOperationId = crypto.randomUUID();
     if (elements.btnConfirmSummary) elements.btnConfirmSummary.disabled = true;
     try {
         await requestOperation('confirm', {}, state.manualConfirmOperationId);
-        // If there's a pending documents step, show it now that user confirmed
-        if (sessionId === state.sessionId && generation === state.voiceGeneration && !state.checkinDone) {
-            showPendingDocuments();
-        }
     }
     catch (err) {
         if (sessionId !== state.sessionId || generation !== state.voiceGeneration || state.checkinDone) return;
@@ -1403,7 +1377,6 @@ function initEventListeners() {
         // from the previous visitor's finished session.
         state.scanCompleted = false; state.pendingInterviewHandoff = false; state.requiresIdScan = false;
         state.documentsUploadedCount = 0;
-        state.pendingDocumentsPrompt = null;
         // Confirmed bug (external review, 2026-09): this was never reset, so
         // the SECOND visitor on the same device inherited the first one's
         // "done" flag — if their DO WebSocket ever dropped mid-interview,
@@ -1437,4 +1410,4 @@ export const __testing = { state, elements, startCheckin, primeAudio, cleanupAud
     handleDOMessage, handleAAILogic, queueToolResult, connectToDO, reconnectToDO,
     proceedToInterview, sendInterviewHandoff, showDone, initEventListeners,
     requestOperation, flushPendingToolResults, buildInterviewPrompt, finishDocumentsStep,
-    confirmSummary, showPendingDocuments, SESSION_STORAGE_KEY, SESSION_TTL_MS, stopCamera, startCamera, capturePhoto };
+    confirmSummary, SESSION_STORAGE_KEY, SESSION_TTL_MS, stopCamera, startCamera, capturePhoto };

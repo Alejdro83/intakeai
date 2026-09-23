@@ -29,11 +29,13 @@ function lastOperation(socket, type) { return socket.sent.filter(message => mess
 test('summary after the documents step shows the confirmation screen', async t => {
   const h = await load(t); pair(h);
   h.app.handleDOMessage({type:'request_documents',prompt:'Synthetic document request'});
-  // Documents step is held — not shown until summary is confirmed
-  assert.equal(h.app.elements.stepDocuments.classList.contains('hidden'),true);
-  assert.equal(h.app.state.pendingDocumentsPrompt,'Synthetic document request');
+  // Documents step must show immediately — holding it until after a summary
+  // that the server won't send until documents_done is received would leave
+  // the visitor stuck with no visible step and no reachable confirm button.
+  assert.equal(h.app.elements.stepDocuments.classList.contains('hidden'),false);
+  assert.equal(h.app.elements.documentsPrompt.textContent,'Synthetic document request');
   h.app.handleDOMessage({type:'summary',answers:{q1:'synthetic answer'},ocr:{}});
-  // Summary is shown, documents still hidden (pending confirmation)
+  // Summary replaces the documents step on the voice screen
   assert.equal(h.app.elements.stepDocuments.classList.contains('hidden'),true);
   assert.equal(h.app.elements.stepVoice.classList.contains('hidden'),false);
   assert.equal(h.app.elements.summaryActions.classList.contains('hidden'),false);
