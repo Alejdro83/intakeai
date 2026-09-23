@@ -27,18 +27,63 @@ function toolResults(socket) { return socket.sent.filter(message => message.type
 function lastOperation(socket, type) { return socket.sent.filter(message => message.type === type).at(-1); }
 
 test('summary after the documents step shows the confirmation screen', async t => {
-  const h = await load(t); pair(h);
+  const h = await load(t); const { voice } = pair(h);
+  h.app.state.micMuted = false;
   h.app.handleDOMessage({type:'request_documents',prompt:'Synthetic document request'});
   // Documents step must show immediately — holding it until after a summary
   // that the server won't send until documents_done is received would leave
   // the visitor stuck with no visible step and no reachable confirm button.
   assert.equal(h.app.elements.stepDocuments.classList.contains('hidden'),false);
   assert.equal(h.app.elements.documentsPrompt.textContent,'Synthetic document request');
+  assert.equal(h.app.state.micMuted,true,'mic is muted while the documents step is UI-driven');
   h.app.handleDOMessage({type:'summary',answers:{q1:'synthetic answer'},ocr:{}});
   // Summary replaces the documents step on the voice screen
   assert.equal(h.app.elements.stepDocuments.classList.contains('hidden'),true);
   assert.equal(h.app.elements.stepVoice.classList.contains('hidden'),false);
   assert.equal(h.app.elements.summaryActions.classList.contains('hidden'),false);
+  assert.equal(h.app.state.micMuted,false,'mic re-enabled once past the documents step');
+  // The agent was told to go quiet for the documents step, with no natural
+  // next turn to resume into — it needs exactly one nudge to pick the
+  // conversation back up and read the summary.
+  await h.tick(600);
+  const replies = voice.sent.filter(m => m.type === 'reply.create');
+  assert.equal(replies.length,1,'exactly one reply.create resumes the agent after documents');
+  assert.match(replies[0].instructions,/summar/i);
+});
+
+test('a summary reached without a documents step never gets an extra nudge', async t => {
+  const h = await load(t); const { voice } = pair(h);
+  // No request_documents was ever received — documentsStepActive stays false.
+  h.app.handleDOMessage({type:'summary',answers:{q1:'synthetic answer'},ocr:{}});
+  await h.tick(600);
+  assert.equal(voice.sent.filter(m => m.type === 'reply.create').length,0);
+});
+
+test('a correction re-summary after documents does not get a second nudge', async t => {
+  const h = await load(t); const { voice } = pair(h);
+  h.app.handleDOMessage({type:'request_documents',prompt:'Synthetic document request'});
+  h.app.handleDOMessage({type:'summary',answers:{q1:'synthetic answer'},ocr:{}});
+  await h.tick(600);
+  assert.equal(voice.sent.filter(m => m.type === 'reply.create').length,1);
+  // A later correction re-sends 'summary' too — documentsStepActive was
+  // already consumed, so this must not fire the nudge again.
+  h.app.handleDOMessage({type:'summary',answers:{q1:'corrected answer'},ocr:{}});
+  await h.tick(600);
+  assert.equal(voice.sent.filter(m => m.type === 'reply.create').length,1);
+});
+
+test('the interview prompt tells the agent about the documents step in advance', async t => {
+  const h = await load(t); pair(h);
+  h.app.state.requiresDocuments = true;
+  h.app.state.documentsPrompt = 'Please upload your insurance card';
+  const withDocs = h.app.buildInterviewPrompt();
+  assert.match(withDocs,/STEP 3/);
+  assert.match(withDocs,/Please upload your insurance card/);
+  assert.match(withDocs,/do not summarize or call confirm_registration yet/i);
+
+  h.app.state.requiresDocuments = false;
+  const withoutDocs = h.app.buildInterviewPrompt();
+  assert.doesNotMatch(withoutDocs,/STEP 3/);
 });
 
 test('importing the real client waits for a user gesture without starting devices or networking', async t => {

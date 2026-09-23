@@ -320,6 +320,11 @@ export class CheckinSession {
         id: q.id, text: q.question_text, type: q.validation_type, field: q.field_key,
       })),
       requires_id_scan: requiresScan,
+      // The agent's system prompt needs to know a documents step is coming
+      // BEFORE the interview starts — otherwise it has no way to avoid
+      // summarizing right after the last question, ahead of that step.
+      requires_documents: !!this.session.businessConfig?.requires_documents,
+      documents_prompt: this.session.businessConfig?.documents_prompt || "",
     });
 
     if (requiresScan) {
@@ -363,6 +368,8 @@ export class CheckinSession {
       voice_id: config.voice_id || "anna",
       voice_persona: config.voice_persona || "",
       requires_id_scan: !!config.requires_id_scan,
+      requires_documents: !!config.requires_documents,
+      documents_prompt: config.documents_prompt || "",
       questions: this.session.questions.map(q => ({ id: q.id, text: q.question_text, type: q.validation_type, field: q.field_key })),
       answers: this.session.answers || {},
       ocr_data: this.session.ocrData || {},
@@ -398,6 +405,8 @@ export class CheckinSession {
             id: q.id, text: q.question_text, type: q.validation_type, field: q.field_key,
           })),
           requires_id_scan: this.session.businessConfig?.requires_id_scan,
+          requires_documents: !!this.session.businessConfig?.requires_documents,
+          documents_prompt: this.session.businessConfig?.documents_prompt || "",
         });
       }
     }

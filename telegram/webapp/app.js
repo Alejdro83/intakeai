@@ -87,7 +87,7 @@ const state = {
     captureCtx: null, playbackCtx: null, playback: null, mic: null,
     aaiReady: false, questions: [], answers: {}, ocrData: null,
     requiresIdScan: false, voiceConnecting: false, pendingToolResults: [], checkinDone: false,
-    documentsUploadedCount: 0,
+    requiresDocuments: false, documentsPrompt: '', documentsStepActive: false, documentsUploadedCount: 0,
     audioAbort: null, startPending: false, voiceGeneration: 0,
     captureNode: null, captureSource: null, voiceTimer: null,
     lastAAIEvent: null, replyDoneSinceLastFlush: false, replyNumber: 0, toolCalls: new Map(), operations: new Map(),
@@ -416,6 +416,8 @@ function requestOperation(type, payload = {}, operationId = crypto.randomUUID())
 function applySessionDetails(msg) {
     state.businessName = msg.business_name || '';
     state.requiresIdScan = !!msg.requires_id_scan;
+    state.requiresDocuments = !!msg.requires_documents;
+    state.documentsPrompt = msg.documents_prompt || '';
     state.questions = msg.questions || [];
     state.welcomeMessage = msg.welcome_message || `Welcome to ${state.businessName}`;
     state.voiceId = msg.voice_id || 'anna';
@@ -492,6 +494,8 @@ function handleDOMessage(msg) {
             state.resumed = false;
             state.businessName = msg.business_name || '';
             state.requiresIdScan = msg.requires_id_scan;
+            state.requiresDocuments = !!msg.requires_documents;
+            state.documentsPrompt = msg.documents_prompt || '';
             state.questions = msg.questions || [];
             state.welcomeMessage = msg.welcome_message || `Welcome to ${state.businessName}!`;
             state.voiceId = msg.voice_id || 'anna';
@@ -548,11 +552,23 @@ function handleDOMessage(msg) {
             dbg('Request documents received: ' + msg.prompt);
             if (elements.documentsPrompt) elements.documentsPrompt.textContent = msg.prompt || '';
             state.micMuted = true; // this step is UI-driven, not a voice exchange
+            // The agent already knows to bring this up itself — its system
+            // prompt has STEP 3 for it (see buildInterviewPrompt). A forced
+            // reply.create here used to race against that and produced a
+            // duplicated summary; the flag below only triggers the one nudge
+            // still needed, to resume speaking once documents are done.
+            state.documentsStepActive = true;
             showStep('documents');
-            announceDocumentsStep(msg.prompt);
             break;
 
-        case 'summary': showSummary(msg.answers, msg.ocr); break;
+        case 'summary':
+            if (state.documentsStepActive) {
+                state.documentsStepActive = false;
+                state.micMuted = false; // re-enable voice input, muted for the documents step
+                announcePostDocumentsSummary();
+            }
+            showSummary(msg.answers, msg.ocr);
+            break;
         case 'checkin_complete': showDone(msg.registration_id); break;
 
         case 'error':
@@ -1038,6 +1054,14 @@ function buildInterviewPrompt() {
         ? `\nID SCAN RESULT:\n- Name: ${ocrName}${ocrFields ? '\n- ' + ocrFields : ''}\n\nSTEP 1 (do this first, before any numbered question): thank the visitor by name — say something like "Thank you, Mr./Ms. ${ocrName}!" — then read back the data above and ask "Is this correct?" Wait for a yes or no. Do NOT call submit_answer for this — it is not one of the numbered questions. If they say ANY field is wrong, ask them to state the correct value, then immediately call correct_ocr_field with that field and the corrected value — do this for every field they correct, before moving on to STEP 2.`
         : '';
     const questionsList = (state.questions || []).map((q, i) => `${i + 1}. "${q.text}" (field: ${q.field})`).join('\n');
+    // The agent must know about the documents step BEFORE the interview
+    // starts — otherwise nothing stops it from summarizing right after the
+    // last question, ahead of that step, which is what caused both a
+    // duplicated spoken summary and a documents step the agent never
+    // actually explained (confirmed by the visitor's own report).
+    const documentsSection = state.requiresDocuments
+        ? `\nSTEP 3 (right after the last question, before summarizing): say exactly this: "${state.documentsPrompt || 'Is there any other document you would like to send?'} If not, please tap Continue." Then stop talking and wait — do not summarize or call confirm_registration yet. The visitor uploads files or taps Continue on screen; you will be prompted again once that is done.`
+        : '';
 
     return `You are a friendly virtual reception assistant at ${state.businessName || 'this office'}.
 ${personaLine()}${ocrSection}
@@ -1047,9 +1071,10 @@ STEP 2 — QUESTIONS (ask ONE AT A TIME, in order, only after the ID scan is con
 ${questionsList}
 
 FLOW:
-${ocrSection ? '1. Do STEP 1 (confirm ID scan) first\n2. Then STEP 2' : '1. Start with STEP 2'}
+${ocrSection ? '1. Do STEP 1 (confirm ID scan) first\n2. Then STEP 2' : '1. Start with STEP 2'}${documentsSection ? '\n3. Then STEP 3 (documents)\n4. Only once prompted again, summarize and ask for confirmation' : ''}
 - For each question: ask it, wait for the answer, call submit_answer with that question's field and their answer, and wait for a successful tool result before acknowledging it or moving on. If a tool fails, explain that the result is unconfirmed and offer a retry; never claim it was saved.
-- After all questions, summarize everything and ask "Is everything correct?" Once the visitor says yes, call confirm_registration — this is the ONLY way the check-in actually finishes, so never skip it. If they say a numbered answer is wrong instead — even after hearing the summary — call submit_answer again with that question's field and the corrected value (this replaces the old answer, it does not add a new one), then summarize again and ask once more. Use correct_ocr_field only for ID scan data, never for a numbered question.
+${documentsSection}
+- ${state.requiresDocuments ? 'Once prompted again after the documents step' : 'After all questions'}, summarize everything and ask "Is everything correct?" Once the visitor says yes, call confirm_registration — this is the ONLY way the check-in actually finishes, so never skip it. If they say a numbered answer is wrong instead — even after hearing the summary — call submit_answer again with that question's field and the corrected value (this replaces the old answer, it does not add a new one), then summarize again and ask once more. Use correct_ocr_field only for ID scan data, never for a numbered question.
 
 RULES:
 - Speak in the visitor's language
@@ -1160,23 +1185,22 @@ function sendInterviewHandoff() {
     }));
 }
 
-// Narrates the optional documents step — the actual advance is 100%
-// UI-driven (upload button / continue button), never a tool call, so
-// there's no risk of the agent "forgetting" to move things along the way
-// confirm_registration turned out to need fixing for the summary step.
-function announceDocumentsStep(prompt) {
+// Resumes the agent after the (optional) documents step — the only point in
+// that step where it genuinely needs a nudge: it was told to go quiet and
+// the mic was muted, so there's no natural next turn for it to continue
+// into, unlike between ordinary questions. Fires once, only when the
+// documents step was actually shown (never for a business without one, and
+// never again on a later correction-triggered re-summary).
+function announcePostDocumentsSummary() {
     if (state.aaiWs?.readyState !== 1) return;
-    dbg('Announcing documents step via reply.create');
-    // Delay reply.create to let the agent finish its current reply (e.g.
-    // acknowledging the last submit_answer). Without this delay, the
-    // reply.create is silently rejected because the agent is still speaking.
+    dbg('Resuming for summary after documents step via reply.create');
     setTimeout(() => {
         if (state.aaiWs?.readyState !== 1) return;
         state.aaiWs.send(JSON.stringify({
             type: 'reply.create',
-            instructions: `Tell the visitor: "${prompt}" Then stay quiet — this step doesn't need you until they finish it.`,
+            instructions: 'Now summarize everything from the interview and ask "Is everything correct?"',
         }));
-    }, 2000);
+    }, 500);
 }
 
 async function uploadDocuments(fileList) {
