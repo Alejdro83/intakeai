@@ -525,9 +525,12 @@ p, li { font-size: 1.25rem; line-height: 1.6; color: var(--text-dim); }
     if (index < 0 || index >= audioFiles.length) return;
     if (index === currentSlideAudio && !player.paused) return; // already playing this slide
     currentSlideAudio = index;
+    player.pause();
     player.src = audioFiles[index];
+    player.load();          // force browser to process new source
     player.currentTime = 0;
-    player.play().catch(() => {});
+    const p = player.play();
+    if (p) p.catch(err => console.warn('Audio play blocked:', err));
   }
 
   function stopAudio() {
@@ -627,8 +630,7 @@ p, li { font-size: 1.25rem; line-height: 1.6; color: var(--text-dim); }
       } else {
         if (current > 0) showSlide(current - 1, -1);
       }
-      // Force audio play in same touchend callstack (required for iOS)
-      player.play().catch(() => {});
+      // showSlide() already calls playAudio() which handles play()
     } else if (Math.abs(dx) < 10 && Math.abs(dy) < 10) {
       paused = !paused; // tap to pause/resume
       if (paused) { player.pause(); }
