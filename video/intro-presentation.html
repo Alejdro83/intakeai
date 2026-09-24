@@ -508,7 +508,7 @@ p, li { font-size: 1.25rem; line-height: 1.6; color: var(--text-dim); }
   let elapsed = 0;
   let lastTick = 0;
 
-  // Single reusable audio element (avoids per-element unlock issues)
+  // ── Web Audio API: pre-decode all audio buffers ──
   const audioFiles = [
     'audio/slide1_hook.mp3',
     'audio/slide2_problem.mp3',
@@ -517,32 +517,52 @@ p, li { font-size: 1.25rem; line-height: 1.6; color: var(--text-dim); }
     'audio/slide5_features.mp3',
     'audio/slide6_cta.mp3',
   ];
-  const player = new Audio();
-  player.preload = 'auto';
+
+  let audioCtx = null;       // created on first user gesture
+  let audioBuffers = [];     // decoded AudioBuffer per slide
+  let currentSource = null;  // active AudioBufferSourceNode
   let currentSlideAudio = -1;
+  let audioReady = false;
+
+  // Pre-fetch + decode all audio files (call after AudioContext is created)
+  async function initAudio() {
+    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    // iOS Safari: resume the context if it's suspended
+    if (audioCtx.state === 'suspended') await audioCtx.resume();
+
+    const fetches = audioFiles.map(async (url) => {
+      const resp = await fetch(url);
+      const arrayBuf = await resp.arrayBuffer();
+      return audioCtx.decodeAudioData(arrayBuf);
+    });
+    audioBuffers = await Promise.all(fetches);
+    audioReady = true;
+    console.log('All audio decoded:', audioBuffers.length, 'files');
+  }
 
   function playAudio(index) {
-    if (index < 0 || index >= audioFiles.length) return;
-    if (index === currentSlideAudio && !player.paused) return;
+    if (!audioReady || index < 0 || index >= audioBuffers.length) return;
+    if (index === currentSlideAudio && currentSource) return; // already playing this slide
+
+    // Stop any currently playing source
+    stopAudio();
+
     currentSlideAudio = index;
-    player.pause();
-    player.removeAttribute('src'); // clear old source completely
-    player.src = audioFiles[index];
-    player.load();
-    // Wait for the browser to actually load the new source before playing
-    const idx = index;
-    player.oncanplay = () => {
-      if (currentSlideAudio !== idx) return; // slide changed while loading
-      player.currentTime = 0;
-      player.play().catch(err => console.warn('Audio play blocked:', err));
-      player.oncanplay = null;
+    const source = audioCtx.createBufferSource();
+    source.buffer = audioBuffers[index];
+    source.connect(audioCtx.destination);
+    source.onended = () => {
+      if (currentSource === source) currentSource = null;
     };
+    source.start(0);
+    currentSource = source;
   }
 
   function stopAudio() {
-    player.pause();
-    player.currentTime = 0;
-    currentSlideAudio = -1;
+    if (currentSource) {
+      try { currentSource.stop(0); } catch(e) { /* already stopped */ }
+      currentSource = null;
+    }
   }
 
   function getDuration(i) {
@@ -605,8 +625,8 @@ p, li { font-size: 1.25rem; line-height: 1.6; color: var(--text-dim); }
     if (e.code === 'Space') {
       e.preventDefault();
       paused = !paused;
-      if (paused) { player.pause(); }
-      else { player.play().catch(() => {}); }
+      if (paused) { stopAudio(); }
+      else { playAudio(current); }
     } else if (e.code === 'ArrowRight') {
       e.preventDefault();
       nextSlide();
@@ -639,8 +659,8 @@ p, li { font-size: 1.25rem; line-height: 1.6; color: var(--text-dim); }
       // showSlide() already calls playAudio() which handles play()
     } else if (Math.abs(dx) < 10 && Math.abs(dy) < 10) {
       paused = !paused; // tap to pause/resume
-      if (paused) { player.pause(); }
-      else { player.play().catch(() => {}); }
+      if (paused) { stopAudio(); }
+      else { playAudio(current); }
     }
   }, { passive: true });
 
@@ -648,10 +668,11 @@ p, li { font-size: 1.25rem; line-height: 1.6; color: var(--text-dim); }
   paused = true;
   const overlay = document.getElementById('start-overlay');
   overlay.style.display = 'flex';
-  overlay.addEventListener('click', () => {
+  overlay.addEventListener('click', async () => {
     overlay.style.display = 'none';
     paused = false;
-    playAudio(0);
+    await initAudio();        // decode all 6 audio files in parallel
+    playAudio(0);             // start first slide audio
     lastTick = performance.now();
     requestAnimationFrame(tick);
   });
