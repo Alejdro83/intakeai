@@ -523,14 +523,20 @@ p, li { font-size: 1.25rem; line-height: 1.6; color: var(--text-dim); }
 
   function playAudio(index) {
     if (index < 0 || index >= audioFiles.length) return;
-    if (index === currentSlideAudio && !player.paused) return; // already playing this slide
+    if (index === currentSlideAudio && !player.paused) return;
     currentSlideAudio = index;
     player.pause();
+    player.removeAttribute('src'); // clear old source completely
     player.src = audioFiles[index];
-    player.load();          // force browser to process new source
-    player.currentTime = 0;
-    const p = player.play();
-    if (p) p.catch(err => console.warn('Audio play blocked:', err));
+    player.load();
+    // Wait for the browser to actually load the new source before playing
+    const idx = index;
+    player.oncanplay = () => {
+      if (currentSlideAudio !== idx) return; // slide changed while loading
+      player.currentTime = 0;
+      player.play().catch(err => console.warn('Audio play blocked:', err));
+      player.oncanplay = null;
+    };
   }
 
   function stopAudio() {
