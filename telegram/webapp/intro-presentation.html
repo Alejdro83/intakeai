@@ -501,6 +501,31 @@ p, li { font-size: 1.25rem; line-height: 1.6; color: var(--text-dim); }
   let timer = null;
   let elapsed = 0;
   let lastTick = 0;
+  let currentAudio = null;
+
+  // Audio files for each slide
+  const audioFiles = [
+    'audio/slide1_hook.mp3',
+    'audio/slide2_problem.mp3',
+    'audio/slide3_solution.mp3',
+    'audio/slide4_architecture.mp3',
+    'audio/slide5_features.mp3',
+    'audio/slide6_cta.mp3',
+  ];
+  const audioCache = audioFiles.map(src => { const a = new Audio(src); a.preload = 'auto'; return a; });
+
+  function playAudio(index) {
+    if (currentAudio) { currentAudio.pause(); currentAudio.currentTime = 0; }
+    if (index < audioCache.length) {
+      currentAudio = audioCache[index];
+      currentAudio.currentTime = 0;
+      currentAudio.play().catch(() => {});
+    }
+  }
+
+  function stopAudio() {
+    if (currentAudio) { currentAudio.pause(); currentAudio.currentTime = 0; currentAudio = null; }
+  }
 
   function getDuration(i) {
     return parseInt(slides[i].dataset.duration) || 10000;
@@ -519,6 +544,7 @@ p, li { font-size: 1.25rem; line-height: 1.6; color: var(--text-dim); }
     elapsed = 0;
     lastTick = performance.now();
     updateProgress();
+    playAudio(current);
   }
 
   function updateProgress() {
@@ -561,6 +587,8 @@ p, li { font-size: 1.25rem; line-height: 1.6; color: var(--text-dim); }
     if (e.code === 'Space') {
       e.preventDefault();
       paused = !paused;
+      if (paused) { if (currentAudio) currentAudio.pause(); }
+      else { if (currentAudio) currentAudio.play().catch(() => {}); }
     } else if (e.code === 'ArrowRight') {
       e.preventDefault();
       nextSlide();
@@ -586,6 +614,8 @@ p, li { font-size: 1.25rem; line-height: 1.6; color: var(--text-dim); }
       dx < 0 ? nextSlide() : prevSlide();
     } else if (Math.abs(dx) < 10 && Math.abs(dy) < 10) {
       paused = !paused; // tap to pause/resume
+      if (paused) { if (currentAudio) currentAudio.pause(); }
+      else { if (currentAudio) currentAudio.play().catch(() => {}); }
     }
   }, { passive: true });
 
