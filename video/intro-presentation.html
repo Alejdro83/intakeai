@@ -507,9 +507,8 @@ p, li { font-size: 1.25rem; line-height: 1.6; color: var(--text-dim); }
   let timer = null;
   let elapsed = 0;
   let lastTick = 0;
-  let currentAudio = null;
 
-  // Audio files for each slide
+  // Single reusable audio element (avoids per-element unlock issues)
   const audioFiles = [
     'audio/slide1_hook.mp3',
     'audio/slide2_problem.mp3',
@@ -518,19 +517,23 @@ p, li { font-size: 1.25rem; line-height: 1.6; color: var(--text-dim); }
     'audio/slide5_features.mp3',
     'audio/slide6_cta.mp3',
   ];
-  const audioCache = audioFiles.map(src => { const a = new Audio(src); a.preload = 'auto'; return a; });
+  const player = new Audio();
+  player.preload = 'auto';
+  let currentSlideAudio = -1;
 
   function playAudio(index) {
-    if (currentAudio) { currentAudio.pause(); currentAudio.currentTime = 0; }
-    if (index < audioCache.length) {
-      currentAudio = audioCache[index];
-      currentAudio.currentTime = 0;
-      currentAudio.play().catch(() => {});
-    }
+    if (index < 0 || index >= audioFiles.length) return;
+    if (index === currentSlideAudio && !player.paused) return; // already playing this slide
+    currentSlideAudio = index;
+    player.src = audioFiles[index];
+    player.currentTime = 0;
+    player.play().catch(() => {});
   }
 
   function stopAudio() {
-    if (currentAudio) { currentAudio.pause(); currentAudio.currentTime = 0; currentAudio = null; }
+    player.pause();
+    player.currentTime = 0;
+    currentSlideAudio = -1;
   }
 
   function getDuration(i) {
@@ -593,8 +596,8 @@ p, li { font-size: 1.25rem; line-height: 1.6; color: var(--text-dim); }
     if (e.code === 'Space') {
       e.preventDefault();
       paused = !paused;
-      if (paused) { if (currentAudio) currentAudio.pause(); }
-      else { if (currentAudio) currentAudio.play().catch(() => {}); }
+      if (paused) { player.pause(); }
+      else { player.play().catch(() => {}); }
     } else if (e.code === 'ArrowRight') {
       e.preventDefault();
       nextSlide();
@@ -625,11 +628,11 @@ p, li { font-size: 1.25rem; line-height: 1.6; color: var(--text-dim); }
         if (current > 0) showSlide(current - 1, -1);
       }
       // Force audio play in same touchend callstack (required for iOS)
-      if (currentAudio) currentAudio.play().catch(() => {});
+      player.play().catch(() => {});
     } else if (Math.abs(dx) < 10 && Math.abs(dy) < 10) {
       paused = !paused; // tap to pause/resume
-      if (paused) { if (currentAudio) currentAudio.pause(); }
-      else { if (currentAudio) currentAudio.play().catch(() => {}); }
+      if (paused) { player.pause(); }
+      else { player.play().catch(() => {}); }
     }
   }, { passive: true });
 
