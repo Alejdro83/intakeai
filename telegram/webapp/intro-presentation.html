@@ -617,7 +617,15 @@ p, li { font-size: 1.25rem; line-height: 1.6; color: var(--text-dim); }
     const dx = e.changedTouches[0].clientX - touchStartX;
     const dy = e.changedTouches[0].clientY - touchStartY;
     if (Math.abs(dx) > Math.abs(dy) && Math.abs(dx) > 40) {
-      dx < 0 ? nextSlide() : prevSlide();
+      // Navigate
+      if (dx < 0) {
+        if (current < totalSlides - 1) showSlide(current + 1, 1);
+        else showSlide(0, 1);
+      } else {
+        if (current > 0) showSlide(current - 1, -1);
+      }
+      // Force audio play in same touchend callstack (required for iOS)
+      if (currentAudio) currentAudio.play().catch(() => {});
     } else if (Math.abs(dx) < 10 && Math.abs(dy) < 10) {
       paused = !paused; // tap to pause/resume
       if (paused) { if (currentAudio) currentAudio.pause(); }
