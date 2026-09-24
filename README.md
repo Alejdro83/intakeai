@@ -8,12 +8,13 @@
 [![Cloudflare Workers](https://img.shields.io/badge/Cloudflare-Workers%20%2B%20D1%20%2B%20R2-F38020?logo=cloudflare&logoColor=white)](https://workers.cloudflare.com)
 [![AssemblyAI Voice Agent API](https://img.shields.io/badge/AssemblyAI-Voice%20Agent%20API-2545E6)](https://www.assemblyai.com/docs/voice-agents/voice-agent-api)
 [![live demo](https://img.shields.io/badge/demo-intakeai--col.pages.dev-00C805)](https://intakeai-col.pages.dev)
+[![Presentation](https://img.shields.io/badge/slides-intro%20presentation-F24E1E?logo=github&logoColor=white)](https://intakeai-col.pages.dev/intro-presentation.html)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
 
 Submission for lablab.ai's **AssemblyAI Voice Agent Hackathon**
 (1–30 Sep 2026).
 
-**For judges:** [Business directory](https://intakeai-col.pages.dev/admin-panel-view.html) —
+**For judges:** [Intro presentation](https://intakeai-col.pages.dev/intro-presentation.html) (90s animated overview) · [Business directory](https://intakeai-col.pages.dev/admin-panel-view.html) —
 a public, read-only view of how each business is configured (welcome
 message, questions), no login needed. It's not the real admin panel: that one
 requires a Telegram session and is intentionally locked down, since it can
