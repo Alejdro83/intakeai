@@ -1,6 +1,3 @@
-<img src="assemblyai.png" width="500"/>
-
----
 
 # Virtualobby — Universal Virtual Reception Agent
 
